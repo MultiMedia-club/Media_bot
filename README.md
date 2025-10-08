@@ -1,0 +1,2 @@
+# Media_bot
+Discordで稼働するMediaBotのリポジトリです
