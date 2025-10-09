@@ -6,6 +6,7 @@ import json
 import datetime
 import re
 import glob
+import functools
 
 from emoji import is_emoji
 
@@ -120,8 +121,14 @@ RANK_DICT = {
 
 start_time = 20040401
 
+class FaildError(Exception):
+    arg = ''
 
-class InputError(Exception):
+    def __init__(self,arg:str):
+        self.arg = arg
+        pass
+
+class InputError(FaildError):
     arg = ''
 
     def __init__(self,arg:str):
@@ -132,7 +139,49 @@ class InputError(Exception):
         return f'{self.arg}の値が不正です'
         pass
 
+class NoMemberError(FaildError):
+    arg = ''
 
+    def __init__(self,arg:str):
+        self.arg = arg
+        pass
+
+    def __str__(self):
+        return f'{self.arg}のデータが見つかりません'
+        pass
+
+class NoChannelError(FaildError):
+    arg = ''
+
+    def __init__(self,arg:str):
+        self.arg = arg
+        pass
+
+    def __str__(self):
+        return f'{self.arg}が見つかりません'
+        pass
+
+class MemberDataError(FaildError):
+    arg = ''
+
+    def __init__(self,arg:str):
+        self.arg = arg
+        pass
+
+    def __str__(self):
+        return f'{self.arg}'
+        pass
+
+class FailedMemberEditError(FaildError):
+    arg = ''
+
+    def __init__(self,arg:str):
+        self.arg = arg
+        pass
+
+    def __str__(self):
+        return f'{self.arg}'
+        pass
 
 
 class memberData(typing.TypedDict):
@@ -182,7 +231,7 @@ class GuildData:
     interests  : typing.Dict[str,interestData] = {}
 
     role_tags  : typing.Dict[str,roleTagData] = {}
-    
+
     source     : str
     guild_id   : int
 
@@ -198,7 +247,7 @@ class GuildData:
         else:
             with open(os.path.join(self.source,'parameters.json'),encoding='utf-8') as f:
                 self.parameters = json.load(f)
-        
+
         if not os.path.exists(os.path.join(self.source,'memberList.json')):
             self.members = {}
         else:
@@ -222,7 +271,7 @@ class GuildData:
                         )
                     except:
                         pass
-            
+
         if not os.path.exists(os.path.join(self.source,'channelList.json')):
             self.channels = {}
         else:
@@ -234,6 +283,8 @@ class GuildData:
         else:
             with open(os.path.join(self.source,'interestList.json'),encoding='utf-8') as f:
                 self.interests = json.load(f)
+        
+        self.state = True
         pass
 
     def save_member_data(self):
@@ -921,9 +972,9 @@ class MemberManagerBot(commands.Cog):
             except Exception as e:
                 print(e)
                 state &= False
-        
+
         cls.INSTANCE.mgt_hour_loop.start()
-            
+
         await cls.Bot.set_cog_state('MemberManagementBot',0 if state else 2)
         cls.STATUS = state
 
@@ -936,8 +987,15 @@ class MemberManagerBot(commands.Cog):
 
     @commands.Cog.listener()
     async def on_interaction(self,itc: discord.Interaction):
-        if (self.STATUS):
+        if (itc.data.get('custom_id','').startswith('media_mgt')):
             guild_data = MemberManagerBot.DATA.get(str(itc.guild.id))
+            if guild_data is None:
+                await itc.followup.send('このサーバーのデータが見つかりません',ephemeral=True)
+                return
+            if not guild_data.state:
+                await itc.followup.send('このボットは現在正常に動作していません',ephemeral=True)
+                return
+            
 
             if (itc.data.get('custom_id','').startswith('media_mgt')):
                 if (itc.data.get('custom_id','').startswith('media_mgt_join')):
@@ -962,7 +1020,7 @@ class MemberManagerBot(commands.Cog):
                             guild_data.members[str(itc.user.id)]['stop_count'] += 1
                             await self.set_member_data(itc.user)
                             await itc.followup.send('更新回数を設定しました',ephemeral=True)
-                            
+
                         elif (itc.data.get('custom_id','') == 'media_mgt_debug_command2'):
                             if (guild_data.members.get(str(itc.user.id)) is  None):
                                 raise
@@ -1041,18 +1099,66 @@ class MemberManagerBot(commands.Cog):
                             await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
                             await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
                             pass
-                        
+
                         else:
                             await itc.followup.send('不明なコマンド',ephemeral=True)
                     except Exception as e:
                         await itc.followup.send('エラーが発生しました',ephemeral=True)
-            pass
-        else:
-            if (itc.data.get('custom_id','').startswith('media_mgt')):
-                await itc.response.send_message('現在稼働していません',ephemeral=True)
+  
+
 
     # コマンド
-    # コマンド:チャンネル設定
+    def command_checker(func):
+        @functools.wraps(func)
+        async def wrapper(self,ctx:discord.Interaction,**kwargs):
+            await ctx.response.defer(thinking=False,ephemeral=True)
+
+            guild_data = MemberManagerBot.DATA.get(str(ctx.guild.id))
+
+            if guild_data is None:
+                await ctx.followup.send('このサーバーのデータが見つかりません',ephemeral=True)
+                return
+            if not guild_data.state:
+                await ctx.followup.send('このボットは現在正常に動作していません',ephemeral=True)
+                return
+
+            ctx.extras['data'] = guild_data
+            ctx.extras['process'] = 'func'
+
+            res = {'content':'None'}
+            log = {'content':'None'}
+
+            try:
+                res,log = await func(self,ctx,**kwargs)
+            except Exception as e:
+                if isinstance(e,FaildError):
+                    res = {'content':f'エラーが発生しました\n{e.arg}'}
+                    log = MemberManagerBot.generate_command_failed_log_embed(ctx,e,ctx.extras['process'])
+                else:
+                    res = {'content':'エラーが発生しました'}
+                    log = MemberManagerBot.generate_command_error_log_embed(ctx,e,'不明なエラー')
+            finally:
+                message = await ctx.followup.send(**res,ephemeral=True,wait=True,silent=True)
+                await MemberManagerBot.output_log(ctx.guild,log)
+
+                try:
+                    await asyncio.sleep(ctx.extras.get('wait_time',60))
+                    await message.delete()
+                except Exception as e:
+                    pass
+
+        return wrapper
+
+    async def media_mgt_interest_auto(self,interaction:discord.Interaction,current:str) -> typing.List[discord.app_commands.Choice[str]]:
+        return [
+            discord.app_commands.Choice(name=value['emoji']+value['label'],value=key) for key,value in self.DATA[str(interaction.guild.id)].interests.items() if
+            (value['label'].startswith(current) or value['emoji'].startswith(current) or key.startswith(current))
+            ]
+
+
+
+
+    # コマンド:チャンネル設定✅
     @discord.app_commands.command(name='media_mgt_set_channel',description='チャンネルを設定します')
     @discord.app_commands.choices(
         channel_type = [
@@ -1066,46 +1172,44 @@ class MemberManagerBot(commands.Cog):
     )
     @discord.app_commands.describe(channel_type='チャンネルの種類')
     @discord.app_commands.describe(channel='対象チャンネル. 省略時は現在のチャンネル')
+    @command_checker
     async def media_mgt_set_channel(
             self,
             ctx:discord.Interaction,
             channel_type:discord.app_commands.Choice[str],
             channel:discord.TextChannel=None
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        try:
-            guild_data = self.DATA[str(ctx.guild.id)]
-            if channel_type.value not in ['join','update','interest','log','year_counter','member_counter']:
-                raise InputError('channel_type')
-            if channel is None:
-                channel = ctx.channel
+        guild_data : GuildData = ctx.extras['data']
 
-            message = None
-            try:
-                if channel_type.value == 'join':
-                    message = await channel.send(self.JoinWidget.Start())
-                elif channel_type.value == 'update':
-                    message = await channel.send(self.UpdateWidget.Start())
-                elif channel_type.value == 'interest':
-                    message = await channel.send(self.InterestWidget.Start(ctx.guild))
-            except Exception as e:
-                error_msg = 'チャンネルの送信に失敗しました'
-                raise e
+        ctx.extras['process'] = '入力確認'
+        if (type(channel_type) is not discord.app_commands.models.Choice) and (channel_type.value not in ['join','update','interest','log','year_counter','member_counter']):
+            raise InputError('channel_type')
+        if channel is None:
+            channel = ctx.channel
+        
+        ctx.extras['process'] = '埋め込みメッセージ送信'
+        message : discord.Message = None
+        if (channel_type.value == 'join'):
+            message = await channel.send(**self.JoinWidget.Start())
+        elif (channel_type.value == 'update'):
+            message = await channel.send(**self.UpdateWidget.Start())
+        elif (channel_type.value == 'interest'):
+            message = await channel.send(**self.InterestWidget.Start(ctx.guild))
+        
+        ctx.extras['process'] = 'データ更新'
+        guild_data.channels[channel_type.value] = {
+            'channel':channel.id,
+            'message':message.id if message is not None else None
+        }
+        guild_data.save_channel_data()
 
-            guild_data.channels[channel_type.value] = {
-                'channel':channel.id,
-                'message':message.id if (type(message) is discord.Message) else None
-            }
-            guild_data.save_channel_data()
+        ctx.extras['process'] = '出力'
+        msg = f'{channel_type.name}を<#{channel.id}>に設定しました'
+        res = {'content':msg}
+        log = self.generate_command_log_embed(ctx,msg)
 
-            await ctx.followup.send(f'{channel_type.name}を設定しました',ephemeral=True)
-            await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,f'<#{channel.id}>を{channel_type.name}に設定しました'))
-
-        except Exception as e:
-            await ctx.followup.send('エラーが発生しました',ephemeral=True)
-            await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-
+        return res,log
+            
 
     @discord.app_commands.command(name='media_mgt_set_category',description='カテゴリを設定します')
     @discord.app_commands.choices(
@@ -1116,111 +1220,105 @@ class MemberManagerBot(commands.Cog):
     )
     @discord.app_commands.describe(category_type='カテゴリの種類')
     @discord.app_commands.describe(category='対象カテゴリ. 省略時は現在のチャンネルが属するカテゴリ')
+    @command_checker
     async def media_mgt_set_category(
             self,
             ctx:discord.Interaction,
             category_type:discord.app_commands.Choice[str],
             category:discord.CategoryChannel=None
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                if category_type.value not in ['creation','hidden']:
-                    raise InputError('category_type')
-                if category is None:
-                    category = ctx.channel.category
-                    if category is None:
-                        raise InputError('category')
-                guild_data.channels[category_type.value] = {
-                    'channel':category.id,
-                    'message':None
-                }
-                guild_data.save_channel_data()
+        guild_data : GuildData = ctx.extras['data']
 
-                await ctx.followup.send(f'{category_type.name}を設定しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,f'<#{category.id}>を{category_type.name}に設定しました'))
+        ctx.extras['process'] = '入力確認'
+        if (type(category_type) is not discord.app_commands.models.Choice):
+            raise InputError('category_type')
+        elif (category_type.value not in ['creation','hidden']):
+            raise InputError('category_type')
+        
+        if category is None:
+            category = ctx.channel.category
+        elif (type(category) is not discord.CategoryChannel):
+            raise InputError('category')
+        
+        ctx.extras['process'] = 'データ更新'
+        guild_data.channels[category_type.value] = {
+            'channel': category.id,
+            'message': None
+        }
+        guild_data.save_channel_data()
 
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-        else:
-            await ctx.followup.send('メンバー管理ボットは現在正常に稼働していません',ephemeral=True)
+        ctx.extras['process'] = '出力'
+        msg = f'{category_type.name}を<#{category.id}>に設定しました'
+        res = {'content':msg}
+        log = self.generate_command_log_embed(ctx,msg)
 
-
+        return res,log
 
 
     # コマンド:データ編集
     @discord.app_commands.command(name='media_mgt_view_mydata',description='自身の情報を表示します')
+    @command_checker
     async def media_mgt_view_mydata(self,ctx:discord.Interaction):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                data = guild_data.members.get(str(ctx.user.id))
-                if data is None:
-                    error_msg = 'メンバー情報が見つかりません'
-                    raise InputError('member')
+        guild_data : GuildData = ctx.extras['data']
 
-                data = self.check_member_data(data)
-                
-                text = '```ansi\n'
-                text += f'[1;2m[0m[2;37m[1;37m名　前：{data["name"]}\n'
-                text += f'階　級：{RANK_DICT.get(data["rank"],'----')}\n'
-                text += f'学　年：{GRADE_DICT.get(data["grade"],'----')}\n'
-                text += f'コース：{COURSE_DICT.get(data["course"],'----')}\n'
-                text += f'所属班：' + ','.join([f'{guild_data.interests.get(i,{}).get("label")}' for i in data["interest"]])
-                text += '[0m[2;37m[0m\n```'
 
-                embed = discord.Embed(title=f'{ctx.user.name}さんの情報',description='データベースに登録されている情報を表示します',color=0x00ff00,timestamp=datetime.datetime.now())
-                embed.set_author(name=ctx.user.name,icon_url=ctx.user.avatar.url)
-                embed.add_field(name='メンバー情報',value=text)
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(ctx.user.id))
+        if member_data is None:
+            raise NoMemberError(ctx.user.name)
 
-                await ctx.followup.send(embed=embed,ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,'自分の情報を表示しました'))
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-        else:
-            await ctx.followup.send('メンバー管理ボットは現在正常に稼働していません',ephemeral=True)
+        member_data = self.check_member_data(ctx.guild,member_data)
+        if member_data is None:
+            raise NoMemberError(ctx.user.name)
+
+
+        ctx.extras['process'] = '埋め込みメッセージ送信'
+        embed = discord.Embed(
+            title=f'{ctx.user.name}さんの情報',
+            description='データベースに登録されている情報を表示します',
+            color=0x00ff00,
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_author(name=ctx.user.name,icon_url=ctx.user.avatar.url)
+        embed.add_field(name='メンバー情報',value=self.member_data_to_code(guild_data.interests,member_data))
+
+
+        ctx.extras['process'] = '出力'
+        return {'embed':embed},self.generate_command_log_embed(ctx,'ユーザーの情報を表示しました')
+    
 
 
     @discord.app_commands.command(name='media_mgt_view_member',description='メンバーの情報を表示します')
     @discord.app_commands.describe(member='対象のユーザー')
+    @command_checker
     async def media_mgt_view_member(self,ctx:discord.Interaction,member:discord.Member):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                data = guild_data.members.get(str(member.id))
-                if data is None:
-                    error_msg = '指定したユーザーは登録されていません'
-                    raise InputError('member')
-                
-                data = self.check_member_data(data)
-                
-                text = '```ansi\n'
-                text += f'[1;2m[0m[2;37m[1;37m名　前：{data["name"]}\n'
-                text += f'階　級：{RANK_DICT.get(data["rank"],'----')}\n'
-                text += f'学　年：{GRADE_DICT.get(data["grade"],'----')}\n'
-                text += f'コース：{COURSE_DICT.get(data["course"],'----')}\n'
-                text += f'所属班：' + ','.join([f'{guild_data.interests.get(i,{}).get("label")}' for i in data["interest"]])
-                text += '[0m[2;37m[0m\n```'
+        guild_data = self.DATA[str(ctx.guild.id)]
 
-                embed = discord.Embed(title=f'{member.name}さんの情報',description='データベースに登録されている情報を表示します',color=0x00ff00,timestamp=datetime.datetime.now())
-                embed.set_author(name=member.name,icon_url=member.avatar.url)
-                embed.add_field(name='メンバー情報',value=text)
-                await ctx.followup.send(embed=embed,ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,f'<@{member.id}>さんの情報を表示しました'))
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-        else:
-            await ctx.followup.send('メンバー管理ボットは現在正常に稼働していません',ephemeral=True)
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
 
+        ctx.extras['process'] = 'ユーザー確認'
+        data = guild_data.members.get(str(member.id))
+        if data is None:
+            raise NoMemberError(member.name)
+        data = self.check_member_data(ctx.guild,data)
+        if data is None:
+            raise NoMemberError(member.name)
+
+        ctx.extras['process'] = '埋め込みメッセージ送信'
+        embed = discord.Embed(
+            title=f'{member.name}さんの情報',
+            description='データベースに登録されている情報を表示します',
+            color=0x00ff00,
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_author(name=member.name,icon_url=member.avatar.url)
+        embed.add_field(name='メンバー情報',value=self.member_data_to_code(guild_data.interests,data))
+
+        ctx.extras['process'] = '出力'
+        return {'embed':embed},self.generate_command_log_embed(ctx,'ユーザーの情報を表示しました')
+        
 
     @discord.app_commands.command(name='media_mgt_set_rank',description='メンバーのランクを設定します')
     @discord.app_commands.choices(
@@ -1235,35 +1333,98 @@ class MemberManagerBot(commands.Cog):
     )
     @discord.app_commands.describe(member='対象メンバー')
     @discord.app_commands.describe(rank='メンバーのランク')
+    @command_checker
     async def media_mgt_set_rank(
             self,
             ctx:discord.Interaction,
             member:discord.Member,
             rank:discord.app_commands.Choice[str]
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                error_msg = f'サーバーデータが見つかりません{ctx.guild.id}'
-                guild_data = self.DATA[str(ctx.guild.id)]
-                error_msg = 'ランクの照合に失敗しました'
-                self.check_member_rank_editable(ctx.user,member,rank.value)
+        guild_data : GuildData = ctx.extras['data']
 
 
-                data = guild_data.members.get(str(member.id),{})
-                data['rank'] = rank.value
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+        
+        if (type(rank) is not discord.app_commands.models.Choice):
+            raise InputError('rank')
+        elif (rank.value not in ['visitor','member','staff','admin','retirement','consultant']):
+            raise InputError('rank')
+        
 
-                await self.set_member_data(member,data)
+        ctx.extras['process'] = 'ユーザー確認'
+        if (guild_data.members.get(str(member.id)) is None):
+            raise NoMemberError(member.name)
+        if (guild_data.members.get(str(ctx.user.id)) is None):
+            raise NoMemberError(ctx.user.name)
+        data = guild_data.members.get(str(member.id),{})
 
-                await ctx.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,'メンバーのランクを設定しました'))
 
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
+        ctx.extras['process'] = 'ランク照合'
+        self.check_member_rank_editable(ctx.user,member,rank.value)
+
+
+        ctx.extras['process'] = 'メンバー情報更新'
+        data['rank'] = rank.value
+        await self.set_member_data(member,data)
+
+
+        ctx.extras['process'] = '出力'
+        res = {'content':'メンバーのランクを設定しました'}
+        log = self.generate_command_log_embed(ctx,'メンバーのランクを設定しました')
+        log.add_field(name='メンバー情報',value=self.member_data_to_code(guild_data.interests,data))
+
+        return res,log
+
+
+
+    @discord.app_commands.command(name='media_mgt_set_interest',description='メンバーの興味を設定します')
+    @discord.app_commands.autocomplete(interest=media_mgt_interest_auto)
+    @discord.app_commands.describe(member='対象のユーザー')
+    @discord.app_commands.describe(mode='設定方法')
+    @discord.app_commands.describe(interest='班')
+    @command_checker
+    async def media_mgt_set_interest(self,ctx:discord.Interaction,member:discord.Member,mode:bool,interest:str):
+        guild_data : GuildData = ctx.extras['data']
+
+
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+        
+        if (type(mode) is not bool):
+            raise InputError('mode')
+        
+        if (type(interest) is not str):
+            raise InputError('interest')
+        elif (interest not in guild_data.interests.keys()):
+            raise InputError('interest')
+
+
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(member.id))
+        if member_data is None:
+            raise NoMemberError(member.name)
+
+
+        ctx.extras['process'] = 'メンバー情報更新'
+        member_data = guild_data.members.get(str(member.id),{})
+        if mode:
+            member_data['interest'].append(interest)
         else:
-            await ctx.followup.send('メンバー管理ボットは現在正常に稼働していません',ephemeral=True)
+            member_data['interest'].remove(interest)
+        await self.set_member_data(member,member_data)
+
+
+        ctx.extras['process'] = '出力'
+
+        res = {'content':'メンバーの興味を設定しました'}
+        log = self.generate_command_log_embed(ctx,'メンバーの興味を設定しました')
+
+        await res,log
+
+
 
 
     @discord.app_commands.command(name='media_mgt_edit_member',description='メンバー情報を編集します')
@@ -1307,6 +1468,7 @@ class MemberManagerBot(commands.Cog):
     @discord.app_commands.describe(rank='変更後のランク')
     @discord.app_commands.describe(grade='変更後の学年')
     @discord.app_commands.describe(course='変更後のコース')
+    @command_checker
     async def media_mgt_edit_member(
             self,
             ctx:discord.Interaction,
@@ -1316,99 +1478,104 @@ class MemberManagerBot(commands.Cog):
             grade:discord.app_commands.Choice[str] = None,
             course:discord.app_commands.Choice[str] = None
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                self.check_member_rank_editable(ctx.user,member,rank.value if (rank is not None) else None)
+        guild_data : GuildData = ctx.extras['data']
 
-                member_data = guild_data.members.get(str(member.id),{})
-                data = {
-                    'name':name if (name is not None) else member_data.get('name'),
-                    'rank':rank.value if (rank is not None) else member_data.get('rank'),
-                    'grade':grade.value if (grade is not None) else member_data.get('grade'),
-                    'course':course.value if (course is not None) else member_data.get('course'),
-                    'interest':guild_data.members.get(str(member.id),{}).get('interest',[]),
-                    'stop_count':0
-                }
 
-                flag = await self.set_member_data(member,data)
-                if flag:
-                    await ctx.followup.send('メンバー情報を編集しました',ephemeral=True)
-                else:
-                    await ctx.followup.send('メンバー情報を編集できません',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,'メンバー情報を編集しました'))
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+        
+        if (type(name) is not str) and (name is not None):
+            raise InputError('name')
+        
+        if (type(rank) is not discord.app_commands.models.Choice) and (rank is not None):
+            raise InputError('rank')
+        elif (rank.value not in ['visitor','member','staff','admin','retirement','consultant']):
+            raise InputError('rank')
+        
+        if (type(grade) is not discord.app_commands.models.Choice) and (grade is not None):
+            raise InputError('grade')
+        elif (grade.value not in ['graduation','special','grade1','grade2','grade3','grade4','grade5']):
+            raise InputError('grade')
+        
+        if (type(course) is not discord.app_commands.models.Choice) and (course is not None):
+            raise InputError('course')
+        elif (course.value not in ['class5','class6','class7','class8','courseT','courseA','courseR','courseW']):
+            raise InputError('course')
+        
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(member.id))
+        if member_data is None:
+            raise NoMemberError(member.name)
+        
 
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
+        ctx.extras['process'] = 'ランク照合'
+        self.check_member_rank_editable(ctx.user,member,rank.value if (rank is not None) else None)
+
+        
+        ctx.extras['process'] = 'メンバー情報更新'
+        data = {
+            'name':name if (name is not None) else member_data.get('name'),
+            'rank':rank.value if (rank is not None) else member_data.get('rank'),
+            'grade':grade.value if (grade is not None) else member_data.get('grade'),
+            'course':course.value if (course is not None) else member_data.get('course'),
+            'interest':guild_data.members.get(str(member.id),{}).get('interest',[]).copy(),
+            'stop_count':0
+        }
+        flag = await self.set_member_data(member,data)
+
+
+        ctx.extras['process'] = '出力'
+        if flag:
+            return {'content':'メンバー情報を編集しました'},self.generate_command_log_embed(ctx,'メンバー情報を編集しました')
         else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
+            return {'content':'メンバー情報を編集できません'},self.generate_command_failed_log_embed(ctx,FailedMemberEditError(member.name),'メンバー情報を編集できません')
 
 
 
-    @discord.app_commands.command(name='media_mgt_set_interest',description='メンバーの興味を設定します')
-    @discord.app_commands.describe(member='対象のユーザー')
-    @discord.app_commands.describe(mode='設定方法')
-    @discord.app_commands.describe(interest='班')
-    async def media_mgt_set_interest(self,ctx:discord.Interaction,member:discord.Member,mode:bool,interest:str):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                data = guild_data.members.get(str(member.id),{})
-                if mode:
-                    data['interest'].append(interest)
-                else:
-                    data['interest'].remove(interest)
-                await self.set_member_data(member,data)
-                await ctx.followup.send('メンバーの興味を設定しました',ephemeral=True)
-                pass
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
 
-        else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
-
-
+    
     @discord.app_commands.command(name='media_mgt_clear_member',description='メンバーのデータをクリアします')
     @discord.app_commands.describe(member='対象メンバー')
+    @command_checker
     async def media_mgt_clear_member(self,ctx:discord.Interaction,member:discord.Member):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                flag = await self.clear_member_data(member)
-                if (flag):
-                    await ctx.followup.send('メンバーのデータをクリアしました',ephemeral=True)
-                else:
-                    await ctx.followup.send('メンバーのデータをクリアできません',ephemeral=True)
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
+        guild_data : GuildData = ctx.extras['data']
 
+
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+        
+
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(member.id))
+        if member_data is None:
+            raise NoMemberError(member.name)
+        
+
+        ctx.extras['process'] = 'メンバー情報更新'
+        flag = await self.clear_member_data(member)
+
+
+        ctx.extras['process'] = '出力'
+        if flag:
+            return {'content':'メンバー情報をクリアしました'},self.generate_command_log_embed(ctx,'メンバー情報をクリアしました')
         else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
+            return {'content':'メンバー情報をクリアできません'},self.generate_command_failed_log_embed(ctx,FailedMemberEditError(member.name),'メンバー情報をクリアできません')
+
+
 
 
 
     # コマンド:班設定
-    async def media_mgt_interest_auto(self,interaction:discord.Interaction,current:str) -> typing.List[discord.app_commands.Choice[str]]:
-        return [
-            discord.app_commands.Choice(name=value['emoji']+value['label'],value=key) for key,value in self.DATA[str(interaction.guild.id)].interests.items() if
-            (value['label'].startswith(current) or value['emoji'].startswith(current) or key.startswith(current))
-            ]
-
+    
     @discord.app_commands.command(name='media_mgt_add_interest',description='班を追加します')
     @discord.app_commands.describe(label='名前')
     @discord.app_commands.describe(value='内部識別子')
     @discord.app_commands.describe(emoji='絵文字')
     @discord.app_commands.describe(role='対応するロール')
     @discord.app_commands.describe(channel='対応するチャンネル')
+    @command_checker
     async def media_mgt_add_interest(
         self,
         ctx:discord.Interaction,
@@ -1418,58 +1585,81 @@ class MemberManagerBot(commands.Cog):
         role:discord.Role = None,
         channel:discord.TextChannel = None
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                # 値のチェック
-                if (label in [interest['label'] for interest in guild_data.interests.values()]):
-                    raise InputError('label')
-                if (value in guild_data.interests.keys()):
-                    raise InputError('value')
-                if (emoji in [interest['emoji'] for interest in guild_data.interests.values()] and (not is_emoji(emoji))):
-                    raise InputError('emoji')
-                
-                index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
-                if (role is None):
-                    role = await ctx.guild.create_role(name=label)
-                    await role.edit(position=index,color=guild_data.parameters.get('interest_color',0))
-                else:
-                    await role.edit(name=label,position=index,color=guild_data.parameters.get('interest_color',0))
+        guild_data : GuildData = ctx.extras['data']
 
-                category = self.get_category_data('creation')
-                if category is None:
-                    raise
-                index = max([i.position for i in category.text_channels])
+        
+        ctx.extras['process'] = 'カテゴリ情報取得'
+        category = self.get_category_data('creation')
+        if category is None:
+            raise NoChannelError('所属班カテゴリ')
 
-                if (channel is None):
-                    channel = await ctx.guild.create_text_channel(emoji+label,category=category,position=index)
-                else:
-                    await channel.edit(name=emoji+label,category=category,position=index)
+        
+        ctx.extras['process'] = '入力確認'
+        if (type(label) is not str):
+            raise InputError('label')
+        elif (label in [interest['label'] for interest in guild_data.interests.values()]):
+            raise InputError('label')
 
-                data : interestData = {
-                    'label':label,
-                    'emoji':emoji,
-                    'role_id':role.id,
-                    'channel_id':channel.id
-                }
-                guild_data.interests[value] = data
-                guild_data.save_interest_data()
+        if (type(value) is not str):
+            raise InputError('value')
+        elif (value in guild_data.interests.keys()):
+            raise InputError('value')
+        
+        if (type(emoji) is not str):
+            raise InputError('emoji')
+        elif (emoji.replace('︎','').replace('️','') in [interest['emoji'].replace('︎','').replace('️','') for interest in guild_data.interests.values()] and (not is_emoji(emoji))):
+            raise InputError('emoji')
+        emoji = emoji.replace('︎','').replace('️','') + '️'
 
-                await ctx.followup.send('班を追加しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,''))
+        if (type(role) is not discord.Role) and (role is not None):
+            raise InputError('role')
+        
+        if (type(channel) is not discord.TextChannel) and (channel is not None):
+            raise InputError('channel')
+        
 
-                await self.resend_widget('interest')
-                await self.apply_all_member()
-            except Exception as e:
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                pass
+        ctx.extras['process'] = 'ロール操作'
+        index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
+        if (role is None):
+            role = await ctx.guild.create_role(name=label)
+            await role.edit(position=index,color=guild_data.parameters.get('interest_color',0))
         else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
+            await role.edit(name=label,position=index,color=guild_data.parameters.get('interest_color',0))
 
-        pass
+
+        ctx.extras['process'] = 'チャンネル操作' 
+        index = max([i.position for i in category.text_channels])
+        if (channel is None):
+            channel = await ctx.guild.create_text_channel(emoji+label,category=category,position=index)
+        else:
+            await channel.edit(name=emoji+label,category=category,position=index)
+
+
+
+        ctx.extras['process'] = '班情報更新' 
+        data : interestData = {
+            'label':label,
+            'emoji':emoji,
+            'role_id':role.id,
+            'channel_id':channel.id
+        }
+        guild_data.interests[value] = data
+        guild_data.save_interest_data()
+
+
+        ctx.extras['process'] = '更新処理'
+        await self.resend_widget(ctx.guild,'interest')
+        await self.apply_all_member()
+
+
+        ctx.extras['process'] = '出力'
+        res = {'content':'班を追加しました'}
+        log = self.generate_command_log_embed(ctx,'班を追加しました')
+        log['embed'].add_field(name='班情報',value=self.interest_data_to_code(data),inline=True)
+        
+        return res,log
+    
+
 
 
     @discord.app_commands.command(name='media_mgt_edit_interest',description='班を編集します')
@@ -1480,6 +1670,7 @@ class MemberManagerBot(commands.Cog):
     @discord.app_commands.describe(emoji='絵文字')
     @discord.app_commands.describe(role='対応するロール')
     @discord.app_commands.describe(channel='対応するチャンネル')
+    @command_checker
     async def media_mgt_edit_interest(
         self,
         ctx:discord.Interaction,
@@ -1490,116 +1681,158 @@ class MemberManagerBot(commands.Cog):
         role:discord.Role = None,
         channel:discord.TextChannel = None
     ):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                current = guild_data.interests.get(interest)
-                if (current is None):
-                    raise InputError('interest')
-                # 値のチェック
-                if (label in [inter['label'] for inter in guild_data.interests.values()]) and (label != current['label']):
-                    raise InputError('label')
-                if (value in guild_data.interests.keys()) and (interest != value):
-                    raise InputError('value')
-                if (emoji in [inter['emoji'] for inter in guild_data.interests.values()] and (not is_emoji(emoji))) and (emoji != current['emoji']):
-                    raise InputError('emoji')
-                
-                if label is None:
-                    label = current['label']
-                if value is None:
-                    value = interest
-                if emoji is None:
-                    emoji = current['emoji']
-                
-                error_msg = 'None'
-                index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
-                if (role is None):
-                    role = await ctx.guild.get_role(current['role_id']).edit(name=label,color=guild_data.parameters.get('interest_color',0),position=index)
-                else:
-                    await role.edit(name=label,color=guild_data.parameters.get('interest_color',0),position=index)
+        guild_data : GuildData = ctx.extras['data']
 
-                creation = self.get_category_data('creation')
-                if (channel is None):
-                    channel = ctx.guild.get_channel(current['channel_id'])
-                    await channel.edit(name=emoji+label,category=creation)
-                else:
-                    ch = MemberManagerBot.Bot.get_channel(current['channel_id'])
-                    hidden = self.get_category_data('hidden')
-                    
-                    await ch.edit(category=hidden)
-                    await channel.edit(name=emoji+label,category=creation)
-                
-                del guild_data.interests[interest]
-                
-                data : interestData = {
-                    'label':current['label'] if label is None else label,
-                    'emoji':current['emoji'] if label is None else emoji,
-                    'channel_id':current['channel_id'] if label is None else channel.id,
-                    'role_id':current['role_id'] if role is None else role.id
-                }
-                guild_data.interests[value] = data
-                guild_data.save_interest_data()
+        
+        ctx.extras['process'] = 'カテゴリ情報取得'
+        creation_category = self.get_category_data('creation')
+        if creation_category is None:
+            raise NoChannelError('所属班カテゴリ')
+        
+        hidden_category = self.get_category_data('hidden')
+        if hidden_category is None:
+            raise NoChannelError('非表示カテゴリ')
 
-                await ctx.followup.send('班を編集しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,''))
 
-                await self.resend_widget('interest')
-                for key,val in guild_data.members.items():
-                    try:
-                        interests = [value if i == interest else i for i in val.get('interest',[])]
-                        if (interests != val.get('interest',[])):
-                            guild_data.members[key]['interest'] = interests
-                    except:
-                        pass
-                await self.apply_all_member()
-            except Exception as e:
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                pass
+        ctx.extras['process'] = '入力確認'
+        current = guild_data.interests.get(interest)
+        if (current is None):
+            raise InputError('interest')
+
+        if label is None:
+            label = current['label']
+        elif (type(label) is not str):
+            raise InputError('label')
+        elif (label in [interest['label'] for interest in guild_data.interests.values()]):
+            raise InputError('label')
+        
+        if value is None:
+            value = interest
+        elif (type(value) is not str):
+            raise InputError('value')
+        elif (value in guild_data.interests.keys()):
+            raise InputError('value')
+        
+        if emoji is None:
+            emoji = current['emoji']
+        elif (type(emoji) is not str):
+            raise InputError('emoji')
+        elif (emoji.replace('︎','').replace('️','') in [interest['emoji'].replace('︎','').replace('️','') for interest in guild_data.interests.values()] and (not is_emoji(emoji))):
+            raise InputError('emoji')
+        emoji = emoji.replace('︎','').replace('️','') + '️'
+
+        if (type(role) is not discord.Role) and (role is not None):
+            raise InputError('role')
+        
+        if (type(channel) is not discord.TextChannel) and (channel is not None):
+            raise InputError('channel')
+        
+
+        ctx.extras['process'] = 'ロール操作'
+        index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
+        if (role is None):
+            role = ctx.guild.get_role(current['role_id'])
         else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
+            before_role = ctx.guild.get_role(current['role_id'])
+            await before_role.delete()
+        await role.edit(name=label,color=guild_data.parameters.get('interest_color',0),position=index)
+
+
+        ctx.extras['process'] = 'チャンネル操作'
+        if (channel is None):
+            channel = ctx.guild.get_channel(current['channel_id'])
+            await channel.edit(name=emoji+label,category=creation)
+        else:
+            before_channel = ctx.guild.get_channel(current['channel_id'])
+            await before_channel.edit(category=hidden_category)
+        await channel.edit(name=emoji+label,category=creation_category,position=index)
+
+
+        ctx.extras['process'] = '班情報更新'
+        before_data = guild_data.interests[interest]
+        del guild_data.interests[interest]
+
+        data : interestData = {
+            'label':current['label'] if label is None else label,
+            'emoji':current['emoji'] if label is None else emoji,
+            'channel_id':current['channel_id'] if label is None else channel.id,
+            'role_id':current['role_id'] if role is None else role.id
+        }
+        guild_data.interests[value] = data
+        guild_data.save_interest_data()
+
+
+        ctx.extras['process'] = '更新処理'
+        for key,val in guild_data.members.items():
+            try:
+                interests = [value if i == interest else i for i in val.get('interest',[])]
+                if (interests != val.get('interest',[])):
+                    guild_data.members[key]['interest'] = interests
+            except:
+                pass
+        await self.apply_all_member()
+
+        await self.resend_widget('interest')
+
+
+        ctx.extras['process'] = '出力'
+        res = {'content':'班を編集しました'}
+        log = self.generate_command_log_embed(ctx,'班を編集しました')
+        log['embed'].add_field(name='変更前',value=self.interest_data_to_code(interest,before_data),inline=True)
+        log['embed'].add_field(name='変更後',value=self.interest_data_to_code(value,data),inline=True)
+
+        return res,log
+        
 
 
 
     @discord.app_commands.command(name='media_mgt_remove_interest',description='班を削除します')
     @discord.app_commands.autocomplete(interest=media_mgt_interest_auto)
     @discord.app_commands.describe(interest='対象班')
+    @command_checker
     async def media_mgt_remove_interest(self,ctx:discord.Interaction,interest:str):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        error_msg = 'None'
-        if self.STATUS:
-            try:
-                guild_data = self.DATA[str(ctx.guild.id)]
-                data = guild_data.interests.get(interest)
-                if (data is None):
-                    await ctx.followup.send(f'{interest}が見つかりません',ephemeral=True)
-                    raise
-
-                channel = ctx.guild.get_channel(data['channel_id'])
-                await channel.edit(category=MemberManagerBot.get_category_data('hidden'))
-
-                role = ctx.guild.get_role(data['role_id'])
-                await role.edit(position=1)
-
-                del guild_data.interests[interest]
-                guild_data.save_interest_data()
-
-                await ctx.followup.send('班を削除しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_log_embed(ctx,''))
-
-                await self.resend_widget('interest')
-                await self.apply_all_member()
-            except Exception as e:
-                await ctx.followup.send('エラーが発生しました',ephemeral=True)
-                await self.output_log(ctx.guild,self.generate_command_error_log_embed(ctx,e,error_msg))
-                pass
-        else:
-            await ctx.followup.send('メンバー管理ボットは動作していません',ephemeral=True)
+        guild_data : GuildData = ctx.extras['data']
 
 
-        pass
+        
+        ctx.extras['process'] = 'カテゴリ情報取得'
+        hidden_category = self.get_category_data('hidden')
+        if hidden_category is None:
+            raise NoChannelError('非表示カテゴリ')
+
+
+        ctx.extras['process'] = '入力確認'
+        current = guild_data.interests.get(interest)
+        if (current is None):
+            raise InputError('interest')
+        
+
+        ctx.extras['process'] = 'ロール操作'
+        role = ctx.guild.get_role(current['role_id'])
+        await role.delete()
+
+        ctx.extras['process'] = 'チャンネル操作'
+        channel = ctx.guild.get_channel(current['channel_id'])
+        await channel.edit(category=hidden_category)
+
+
+        ctx.extras['process'] = '班情報更新'
+        del guild_data.interests[interest]
+        guild_data.save_interest_data()
+
+
+        ctx.extras['process'] = '更新処理'
+        await self.resend_widget('interest')
+        await self.apply_all_member()
+
+
+        ctx.extras['process'] = '出力'
+        res = {'content':'班を削除しました'}
+        log = self.generate_command_log_embed(ctx,'班を削除しました')
+        log['embed'].add_field(name='班情報',value=self.interest_data_to_code(interest,current),inline=True)
+
+        return res,log
+
 
 
 
@@ -1607,6 +1840,7 @@ class MemberManagerBot(commands.Cog):
 
 
     @discord.app_commands.command(name='test_command',description='テストコマンド.使用禁止')
+    @command_checker
     async def test_command(self,ctx:discord.Interaction):
         guild_data = self.DATA[str(ctx.guild.id)]
 
@@ -1624,9 +1858,10 @@ class MemberManagerBot(commands.Cog):
         }
         guild_data.save_channel_data()
         await ctx.response.send_message('テストコマンドを実行しました',ephemeral=True)
-    
+
 
     @discord.app_commands.command(name='test_command2',description='テストコマンド2.使用禁止')
+    @command_checker
     async def test_command2(self,ctx:discord.Interaction):
         await ctx.response.defer(thinking=False,ephemeral=True)
         try:
@@ -1657,13 +1892,13 @@ class MemberManagerBot(commands.Cog):
                 result[i] = m is not None
             except:
                 pass
-        
+
         for i in list(['log','year_counter','member_counter']):
             try:
                 result[i] = cls.get_channel_data(guild,i) is not None
             except:
                 pass
-        
+
         for i in list(['creation','hidden']):
             try:
                 result[i] = cls.get_category_data(guild,i) is not None
@@ -1723,19 +1958,18 @@ class MemberManagerBot(commands.Cog):
             return False
 
 
-
     # 関数:メンバーデータ編集
     @classmethod
     def check_member_rank_editable(cls,from_member:discord.Member,to_member:discord.Member,val:RANK = None):
-        class RankValueError(Exception):
+        class RankValueError(FaildError):
             def __init__(self,message:str):
-                self.message = message
+                self.arg = message
 
             def __str__(self):
-                return self.message
+                return self.arg
 
         if (from_member.guild.id != to_member.guild.id):
-            raise RankValueError('実行者と対象者のサーバーが異なります')
+            raise MemberDataError('実行者と対象者のサーバーが異なります')
         data = cls.DATA[str(from_member.guild.id)]
 
         from_rank = data.members.get(str(from_member.id),{}).get('rank')
@@ -1743,11 +1977,11 @@ class MemberManagerBot(commands.Cog):
         ranks = ['visitor','member','staff','admin','retirement','consultant','owner']
 
         if from_rank not in ranks:
-            raise RankValueError('実行者のランクが取得できません')
+            raise MemberDataError('実行者のランクが取得できません')
         elif to_rank not in ranks:
-            raise RankValueError('対象者のランクが取得できません')
+            raise MemberDataError('対象者のランクが取得できません')
         elif (val not in ranks and val is not None):
-            raise RankValueError('値が不正です')
+            raise InputError('rank')
 
 
         from_val = int(data.role_tags['rank'].get(from_rank,{}).get('value',0))
@@ -1902,8 +2136,9 @@ class MemberManagerBot(commands.Cog):
 
                 for interest in data['interest']:
                     name += str(cls.DATA[str(member.guild.id)].interests.get(interest,{}).get('emoji',''))
+                name = name.replace('︎','').replace('️','')
 
-        if member.guild.owner_id != member.id : 
+        if member.guild.owner_id != member.id :
             if member.nick != name:
                 print(member.nick,name)
                 await member.edit(nick=name)
@@ -1928,12 +2163,6 @@ class MemberManagerBot(commands.Cog):
         # リストの更新
         guild_data.members[str(member_id)] = mold
         if is_save: guild_data.save_member_data()
-
-        try:
-            embed = cls.generate_edit_member_log_embed('',member,guild_data.members.get(str(member_id),{}),mold)
-            await cls.output_log(member.guild,{'embed':embed})
-        except:
-            pass
 
         # ロールの更新
         await cls.set_member_role(member,mold)
@@ -2013,7 +2242,7 @@ class MemberManagerBot(commands.Cog):
         ch = guild.get_channel(data.channels.get('year_counter',{}).get('channel',0))
         if ch is None:
             return
-        
+
         try:
             name = ch.name
             val = int(re.search(r'\d+',name).group())
@@ -2024,7 +2253,7 @@ class MemberManagerBot(commands.Cog):
                 v = val
                 while (now >= (v+1)*10000+start_time):
                     v += 1
-                
+
                 print('更新する',val,v)
                 await ch.edit(name=name.replace(str(val),str(v)))
                 await cls.renewal_all_member(guild,v-val)
@@ -2062,7 +2291,57 @@ class MemberManagerBot(commands.Cog):
             pass
 
 
+    # 関数:変換
+    @classmethod
+    def member_data_to_code(cls,interests,data:memberData):
+        rank_label = {
+            'visitor':'見学',
+            'member':'会員',
+            'staff':'幹部',
+            'admin':'会長',
+            'retirement':'卒業生',
+            'consultant':'顧問',
+            'owner':'管理者'
+        }
 
+        grade_label = {
+            'graduation':'OB・OG',
+            'special':'専攻科',
+            'grade1':'1年',
+            'grade2':'2年',
+            'grade3':'3年',
+            'grade4':'4年',
+            'grade5':'5年',
+        }
+
+        course_label = {
+            'courseT':'情報通信工学コース',
+            'courseR':'ロボット工学コース',
+            'courseA':'航空宇宙工学コース',
+            'courseW':'医療福祉工学コース',
+            'class5':'5組',
+            'class6':'6組',
+            'class7':'7組',
+            'class8':'8組',
+        }
+
+        text = ''
+        text += f'名　前：{data.get("name")}\n'
+        text += f'ランク：{rank_label.get(data.get("rank"),'----')}\n'
+        text += f'学　年：{grade_label.get(data.get("grade"),'----')}\n'
+        text += f'コース：{course_label.get(data.get("course"),'----')}\n'
+        text += f'所属班：' + '\n　　　　'.join([f'{interests.get(i,{}).get("emoji")}{interests.get(i,{}).get("label")}' for i in data.get('interest',[])])
+        return f'```ansi\n[1;2m[0m[2;37m[1;37m{text}\n```'
+
+    @classmethod
+    def interest_data_to_code(cls,value,data:interestData):
+        text = ''
+        text += f'名　前：{data.get("label")}\n'
+        text += f'識別子：{value}\n'
+        text += f'絵文字：{data.get("emoji")}\n'
+        text += f'ロール：{data.get("role_id")}\n'
+        text += f'チャンネル:{data.get("channel_id")}\n'
+        return f'```ansi\n[1;2m[0m[2;37m[1;37m{text}\n```'
 
 
 
@@ -2135,6 +2414,22 @@ class MemberManagerBot(commands.Cog):
         return {'embed':embed}
 
     @classmethod
+    def generate_command_failed_log_embed(cls,ctx:discord.Interaction,error_data:Exception,description:str = 'None'):
+        inputs = [f'{key}:{value}' for key,value in ctx.namespace.__dict__.items()]
+
+        embed = discord.Embed(
+            title='コマンド実行失敗ログ',
+            description = f'コマンド：{ctx.command.name}\n使用者：<@{ctx.user.id}>\nチャンネル：<#{ctx.channel.id}>',
+            color=0xddff99,
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_author(name = str(error_data.__class__.__name__))
+        embed.add_field(name = '入力',value = '```ansi\n'+'\n'.join(inputs if len(inputs)>0 else 'none')+'\n```',inline=False)
+        embed.add_field(name = 'エラー詳細',value = str(error_data.args),inline=False)
+        embed.add_field(name = '備考',value = description,inline=False)
+        return {'embed':embed}
+
+    @classmethod
     def generate_command_error_log_embed(cls,ctx:discord.Interaction,error_data:Exception,description:str = 'None'):
         embed = discord.Embed(
             title='コマンドエラーログ',
@@ -2147,6 +2442,12 @@ class MemberManagerBot(commands.Cog):
         embed.add_field(name = 'エラー詳細',value = str(error_data.args),inline=False)
         embed.add_field(name = '備考',value = description,inline=False)
         return {'embed':embed}
+
+
+
+
+
+
 
     @staticmethod
     def generate_error_embed(error_data:Exception,description:str):
