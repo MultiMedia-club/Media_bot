@@ -20,11 +20,7 @@ TOKEN='MTQyMzQwNDEyOTM3NTQ4NTk2Mg.GYWt1k.Ry5HnHZp1rJzMVNPq3LraXrRz5FIYXIrZ4er00'
 # 環境変数にsourceのパスを登録
 os.environ['SOURCE'] = os.path.join(os.path.dirname(__file__),'source')
 
-# discord.httpをデバッグレベルで出す
-# logging.basicConfig(level=logging.DEBUG)
-# logging.getLogger("discord.http").setLevel(logging.DEBUG)
-
-class CogState(enum.Enum):
+class CogState(enum.IntEnum):
     ACTIVE   = 0
     LOADING  = 1
     DISABLED = 2
@@ -37,7 +33,7 @@ class MediaBot(commands.Bot):
 
     def __init__(cls):
         super().__init__(command_prefix='!',intents=discord.Intents.all())
-        cls.instance = cls
+        MediaBot.instance = cls
         MediaBot.git = app.git_push.GitPython(
             os.environ['SOURCE'], 
             f'https://{os.environ["GITHUB_TOKEN"]}@github.com/{os.environ["GITHUB_USERNAME"]}/{os.environ["GITHUB_REPOSITORY"]}.git',
@@ -48,16 +44,15 @@ class MediaBot(commands.Bot):
 
     # Botの起動
     def run(self):
-
         super().run(os.environ['DISCORD_TOKEN'])
 
 
     async def on_ready(self):
+        self.hour_loop.start()
+        
         # サーバーIDを環境変数に登録
         activity = discord.CustomActivity(name='セットアップ中...')
-        await self.change_presence(activity=activity,status=discord.Status.idle)
-
-        os.environ['GUILD_ID'] = str(self.guilds[0].id)
+        await self.change_presence(activity=activity,status=discord.Status.dnd)
 
         await asyncio.sleep(5)
 
@@ -71,10 +66,12 @@ class MediaBot(commands.Bot):
             try:
                 # ファイル名から拡張子を除いたものを取得して読み込み
                 p = os.path.basename(cog).replace('.py', '')
+
+                os.makedirs(os.path.join(os.environ['SOURCE'],p), exist_ok=True)
+
                 MediaBot.cogs_status[p] = False
                 await self.load_extension(f'cogs.{p}')
 
-                os.makedirs(os.path.join(os.environ['SOURCE'],p), exist_ok=True)
 
             except Exception as e:
                 print(f'Failed to load cog {cog}: {e}')
@@ -82,7 +79,16 @@ class MediaBot(commands.Bot):
 
         # コマンドツリーの同期
         await self.tree.sync()
+
+        await self.set_cog_state('media_bot', CogState.ACTIVE)
     
+    @tasks.loop(hours=1)
+    async def hour_loop(self):
+        try:
+            self.git.push()
+        except:
+            pass
+
     @classmethod
     async def set_cog_state(cls, cog_name:str, state:CogState):
         if cog_name not in cls.cogs_status.keys():
