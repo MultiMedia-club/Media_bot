@@ -13,10 +13,6 @@ from app.server import server_thread
 
 dotenv.load_dotenv()
 
-#MTQyNDUxNDE1NzA4Mzg4NTU4OA.GxICBE.wtrR9YpFHq-FEkbnN52Xe4vTTxB3TdJmlXh_C4
-#MediaBot
-TOKEN='MTQyMzQwNDEyOTM3NTQ4NTk2Mg.GYWt1k.Ry5HnHZp1rJzMVNPq3LraXrRz5FIYXIrZ4er00'
-
 # 環境変数にsourceのパスを登録
 os.environ['SOURCE'] = os.path.join(os.path.dirname(__file__),'source')
 
