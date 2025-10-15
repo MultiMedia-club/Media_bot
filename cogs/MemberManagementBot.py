@@ -1229,7 +1229,7 @@ class MemberManagerBot(commands.Cog):
                     try:
                         embed = discord.Embed(
                             title='所属班が変更されました',
-                            description=f'実行者:<@{interaction.user.id}>\n変更前：{",".join([self.interests[i]['label'] for i in before])}\n変更後：{",".join([self.interests[i]['label'] for i in self.interest])}',
+                            description=f'実行者:<@{interaction.user.id}>\n変更前：{",".join([self.interests[i]["label"] for i in before])}\n変更後：{",".join([self.interests[i]["label"] for i in self.interest])}',
                             color = 0xffff00,
                             timestamp=datetime.datetime.now(datetime.timezone.utc)
                         )
