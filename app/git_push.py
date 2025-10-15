@@ -55,7 +55,7 @@ class GitPython:
             return False
 
 
-    def push(self, commit_message="Auto backup") -> bool:
+    def push(self,options=".", commit_message="Auto backup") -> bool:
         # ===== ステップ2: 差分確認 =====
         status = self.run(["git", "status", "--porcelain"], cwd=self.directory)
         try:
@@ -63,7 +63,7 @@ class GitPython:
                 print("✅ 差分なし。バックアップをスキップ。")
             else:
                 print("🔄 差分を検出。コミットとpushを実行します。")
-                self.run(["git", "add", "."], cwd=self.directory)
+                self.run(["git", "add", options], cwd=self.directory)
                 self.run(["git", "commit", "-m", commit_message], cwd=self.directory)
                 self.run(["git", "push", self.git_remote, self.git_branch], cwd=self.directory)
                 print("🚀 バックアップをpushしました。")

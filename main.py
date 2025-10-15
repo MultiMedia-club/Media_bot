@@ -6,6 +6,7 @@ from discord import app_commands
 import asyncio
 import glob
 import os
+import json
 import enum
 import dotenv
 import app.git_push
@@ -108,6 +109,16 @@ class MediaBot(commands.Bot):
         await cls.instance.change_presence(activity=activity,status=status)
 
         
+    @discord.app_commands.command(name='media_main_git_push',description='ソースフォルダをgitにpushします')
+    async def media_main_git_push(self,interaction:discord.Interaction):
+        await interaction.response.defer(thinking=False,ephemeral=True)
+
+        try:
+            await interaction.followup.send('ソースフォルダをgitにpushします',ephemeral=True)
+            await self.git.push(str(interaction.guild.id))
+            await interaction.followup.send('完了しました',ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send('失敗しました',ephemeral=True)
 
         
 server_thread()

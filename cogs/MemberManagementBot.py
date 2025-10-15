@@ -1,4 +1,5 @@
 import os
+import copy
 import typing
 import asyncio
 import enum
@@ -7,6 +8,7 @@ import datetime
 import re
 import glob
 import functools
+from typing import Union
 
 from emoji import is_emoji
 
@@ -191,6 +193,7 @@ class memberData(typing.TypedDict):
     course     : COURSE
     interest  : typing.List[str]
     stop_count : int
+    lock       : int
 
 class roleData(typing.TypedDict):
     type         : str
@@ -220,9 +223,12 @@ class interestData(typing.TypedDict):
     role_id : int
     channel_id : int
 
-
+#!B guildData
 class GuildData:
     state      : bool = False
+
+    guild_id   : int
+    source     : str
 
     parameters : typing.Dict[str,typing.Any]   = {}
     members    : typing.Dict[str,memberData]   = {}
@@ -232,8 +238,6 @@ class GuildData:
 
     role_tags  : typing.Dict[str,roleTagData] = {}
 
-    source     : str
-    guild_id   : int
 
     def __init__(self,guild_id:int):
         self.guild_id = guild_id
@@ -242,10 +246,10 @@ class GuildData:
 
         os.makedirs(self.source, exist_ok=True)
 
-        if not os.path.exists(os.path.join(self.source,'parameters.json')):
+        if not os.path.exists(os.path.join(self.source,'parameterList.json')):
             self.parameters = {}
         else:
-            with open(os.path.join(self.source,'parameters.json'),encoding='utf-8') as f:
+            with open(os.path.join(self.source,'parameterList.json'),encoding='utf-8') as f:
                 self.parameters = json.load(f)
 
         if not os.path.exists(os.path.join(self.source,'memberList.json')):
@@ -283,7 +287,7 @@ class GuildData:
         else:
             with open(os.path.join(self.source,'interestList.json'),encoding='utf-8') as f:
                 self.interests = json.load(f)
-        
+
         self.state = True
         pass
 
@@ -308,14 +312,326 @@ class GuildData:
         pass
 
     def save_parameters(self):
-        with open(os.path.join(self.source,'parameters.json'),'w',encoding='utf-8') as f:
+        with open(os.path.join(self.source,'parameterList.json'),'w',encoding='utf-8') as f:
             json.dump(self.parameters,f,indent=4,ensure_ascii=False)
         pass
 
 
 
+    def get_guild(self) -> discord.Guild:
+        return MemberManagerBot.Bot.get_guild(self.guild_id)
+
+
+    # メンバーデータ
+    def get_member_data(self,member: Union[discord.Member,discord.User,int,str]) -> Union[memberData,None]:
+        # 型確認
+        member_id = 0
+
+        if (type(member) == discord.Member):
+            member_id = str(member.id)
+        elif (type(member) == discord.User):
+            member_id = str(member.id)
+        elif (type(member) == int):
+            member_id = str(member)
+        elif (type(member) == str):
+            if member.isdecimal():
+                member_id = member
+            else:
+                raise ValueError('無効なメンバーIDです')
+        else:
+            raise TypeError('メンバーIDを指定してください。')
+        
+        # データの取得
+        if member_id in self.members.keys():
+            return copy.deepcopy(self.members[member_id])
+        else:
+            return None
+
+
+    def check_member_data(self,data:memberData) -> typing.Union[memberData,None]:
+        rank_values = [
+            'visitor',
+            'member',
+            'staff',
+            'admin',
+            'retirement',
+            'consultant',
+            'owner'
+        ]
+
+        grade_values = [
+            'graduation',
+            'special',
+            'grade1',
+            'grade2',
+            'grade3',
+            'grade4',
+            'grade5'
+        ]
+
+        course_values = [
+            'class5',
+            'class6',
+            'class7',
+            'class8',
+            'courseT',
+            'courseA',
+            'courseR',
+            'courseW'
+        ]
+
+        # データ型の確認、成型
+        mold = {
+            'name'  : str(data.get('name')),
+            'rank'  : data.get('rank') if(data.get('rank') in rank_values) else '',
+            'grade' : data.get('grade') if(data.get('grade') in grade_values) else '',
+            'course': data.get('course') if(data.get('course') in course_values) else '',
+            'interest':sorted(list(set([str(i) for i in data.get('interest',[]) if i in self.interests.keys()]))),
+            'stop_count': data.get('stop_count',0) if (type(data.get('stop_count',0)) is int) else 0,
+            'lock': data.get('lock',0) if (type(data.get('lock',0)) is int) else 0
+        }
+
+        # データ値の確認
+        try:
+            if (mold['rank'] == ''): raise # ランク無しは通らない
+            elif (mold['rank'] == 'owner'): pass
+            elif (mold['rank'] == 'consultant'): pass # 顧問は無条件に通過
+            elif (mold['rank'] == 'retirement'):
+                if (mold['course'] == '' or mold['course'].startswith('class')): raise # 卒業生でコースが不正だと通らない
+            elif (mold['grade'] == '' or mold['course'] == ''): raise # 学年、コース無しは通らない
+            elif (mold['grade'] == 'grade1' and mold['course'].startswith('course')): raise
+            elif (mold['grade'] != 'grade1' and mold['course'].startswith('class')): raise
+        except:
+            return None
+
+        # データの成型
+        if (mold['rank'] == 'consultant' or mold['rank'] == 'owner'):
+            mold['stop_count'] = 0
+            mold['grade'] = ''
+            mold['course'] = ''
+        elif (mold['rank'] == 'retirement'):
+            mold['stop_count'] = 0
+            mold['grade'] = 'graduation'
+        elif (mold['grade'] == 'graduation'):
+            mold['stop_count'] = 0
+            if (mold['rank'] in ['staff','member']):
+                mold['rank'] = 'retirement'
+
+        return mold
+
+
+    async def set_member_role(self,member: discord.Member,data:memberData = None) -> bool:
+        if (type(member) is not discord.Member):
+            return False
+
+        # ロールの更新
+        add_roles = []
+        remove_roles = [
+            role for role in member.roles if (str(role.id) in self.get_role_id_list())]
+
+        add_roles_id = []
+        if (data is None):
+            pass
+        elif (data['lock'] > self.get_now()):
+            add_roles_id.append(self.role_tags.get('special_rank',{}).get('lock',{}).get('role_id',0))
+            pass
+        elif (data['stop_count'] > 0):
+            add_roles_id.append(self.role_tags.get('special_rank',{}).get('stop',{}).get('role_id',0))
+        else:
+            add_roles_id.append(self.role_tags.get('rank',{}).get(data['rank'],{}).get('role_id',0))
+            add_roles_id.append(self.role_tags.get('grade',{}).get(data['grade'],{}).get('role_id',0))
+            add_roles_id.append(self.role_tags.get('course',{}).get(data['course'],{}).get('role_id',0))
+            for role in data['interest']:
+                add_roles_id.append(self.interests.get(role,{}).get('role_id',0))
+
+        add_roles = [member.guild.get_role(role_id) for role_id in add_roles_id]
+
+        remove_roles = [role for role in remove_roles if (role not in add_roles   ) and (role is not None)]
+        add_roles    = [role for role in add_roles    if (role not in member.roles) and (role is not None)]
+
+        if (len(remove_roles) > 0):
+            print(f'[{self.get_now_str()}]REMOVE MEMBER_ROLE:{member.name}({member.id}) {remove_roles}')
+            await member.remove_roles(*remove_roles)
+        if (len(add_roles) > 0):
+            print(f'[{self.get_now_str()}]ADD MEMBER_ROLE:{member.name}({member.id}) {add_roles}')
+            await member.add_roles(*add_roles)
+
+        return True
+    
+
+    async def set_member_name(self,member: discord.Member,data:memberData = None) -> bool:
+        name = ''
+
+        if (data is None):
+            name = None
+        else:
+            if (data['lock'] > (d:=self.get_now())):
+                val = '999+' if data['lock'] - d > 999 else str(data['lock'] - d)
+                name = data['name'] + f'_残り{val}日'
+            if (data['stop_count'] > 0):
+                name = data['name']
+            elif (data['rank'] == 'consultant'):
+                name = f'顧問_{data["name"]}'
+            else:
+                if (data['grade'] == 'special'       ):name = '専'
+                elif (data['grade'] == 'graduation'  ):name = '卒'
+                elif (data['grade'] == 'grade1'):
+                    if   (data['course'] == 'class5' ):name = '5組'
+                    elif (data['course'] == 'class6' ):name = '6組'
+                    elif (data['course'] == 'class7' ):name = '7組'
+                    elif (data['course'] == 'class8' ):name = '8組'
+                else:
+                    if   (data['course'] == 'courseT'):name = 'T'
+                    elif (data['course'] == 'courseR'):name = 'R'
+                    elif (data['course'] == 'courseW'):name = 'W'
+                    elif (data['course'] == 'courseA'):name = 'A'
+
+                    if   (data['grade'] == 'grade2'  ):name += '2'
+                    elif (data['grade'] == 'grade3'  ):name += '3'
+                    elif (data['grade'] == 'grade4'  ):name += '4'
+                    elif (data['grade'] == 'grade5'  ):name += '5'
+                name += '_'
+
+                name += data['name'][:24]
+
+                for interest in data['interest']:
+                    name += str(self.interests.get(interest,{}).get('emoji',''))
+                name = name.replace('︎','').replace('️','')
+
+        if member.guild.owner_id != member.id :
+            if member.nick != name:
+                print(f'[{self.get_now_str()}]EDIT MEMBER_NAME:{member.name}({member.id}) {member.nick} -> {name}')
+                await member.edit(nick=name)
+
+
+    async def set_member_data(self,member: discord.Member,data:memberData = None) -> bool:
+        member_id = 0
+
+        # 型確認
+        if (type(member) == discord.Member):
+            member_id = str(member.id)
+        else:
+            raise TypeError('メンバーIDを指定してください。')
+        
+        member_data = None
+        
+        if (data is None):
+            if (member_id in self.members):
+                del self.members[member_id]
+        else:
+            member_data = self.check_member_data(data)
+
+            if member_data == None:
+                return False
+        
+            self.members[member_id] = member_data
+        
+        self.save_member_data()
+
+        self.set_member_role(member,member_data)
+        self.set_member_name(member,member_data)
+
+        return True
+
+
+    def vs_member_rank(self,member1: discord.Member,member2: discord.Member) -> bool:
+        rank1 = self.role_tags.get('rank',{}).get(self.get_member_data(member1)['rank'],{}).get('rank',0)
+        rank2 = self.role_tags.get('rank',{}).get(self.get_member_data(member2)['rank'],{}).get('rank',0)
+
+        return rank1 > rank2
+
+
+    async def clear_member_data(self,member: discord.Member) -> bool:
+        member_id = 0
+
+        # 型確認
+        if (type(member) == discord.Member):
+            member_id = str(member.id)
+        else:
+            raise TypeError('メンバーIDを指定してください。')
+
+        return await self.set_member_data(member,None)
+    
+
+    async def apply_all_member_data(self):
+        new_members = {}
+        guild = self.get_guild()
+
+        for member in guild.members:
+            try:
+                if member.id == guild.owner_id:
+                    member_data = self.check_member_data(member,{'rank':'owner','name':'サーバー管理'})
+                    self.set_member_role(member,member_data)
+                elif str(member.id) in self.members:
+                    member_data = self.check_member_data(member,self.get_member_data(member))
+                    self.set_member_role(member,member_data)
+                    self.set_member_name(member,member_data)
+                else:
+                    self.set_member_role(member,None)
+                    self.set_member_name(member,None)
+
+                new_members[str(member.id)] = member_data
+            except Exception as e:
+                print(e)
+                pass
+
+        self.members = new_members
+
+        self.save_member_data()
+    
+    async def renewal_all_member(self,year:int=1):
+        for member_id in self.members.keys():
+            try:
+                member_data = self.get_member_data(member_id)
+                member_data['stop_count'] += year
+                await self.set_member_data(member_id,member_data)
+            except:
+                pass
+
+
+    
+
+
+
+    def get_now(self) -> int:
+        return int(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d'))
+    
+    def get_now_str(self) -> str:
+        return datetime.datetime.now(datetime.timezone.utc).strftime('%Y/%m/%d %H:%M:%S')
+
+
+    def get_role_id_list(self) -> list:
+        return list(self.roles.keys())+[str(interest['role_id']) for interest in self.interests.values()]
+
+    
+
+
+
+
+class TestWidget(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title='名前を入力してください。')
+        self.item = discord.ui.TextInput(label='名前',placeholder='名前',min_length=1,max_length=24,style=discord.TextStyle.short)
+        self.add_item(self.item)
+    
+    async def on_submit(self,interaction:discord.Interaction):
+        try:
+            await interaction.response.defer(thinking=False,ephemeral=True)
+
+            data = MemberManagerBot.DATA[str(interaction.guild.id)].members[str(interaction.user.id)]
+            data['name'] = self.item.value
+
+            await MemberManagerBot.set_member_data(interaction.user,data)
+
+            await interaction.followup.send('名前を変更しました',ephemeral=True)
+        except Exception as e:
+            print(e)
+
+
+
+
 class MemberManagerBot(commands.Cog):
-    # ウィジェット
+    # ウィジェット !B
     class JoinWidget:
         class Start(dict):
             class Embed(discord.Embed):
@@ -372,7 +688,9 @@ class MemberManagerBot(commands.Cog):
                             label = '名前',
                             placeholder = '名前を入力してください。',
                             custom_id = 'name',
-                            style = discord.TextStyle.short
+                            style = discord.TextStyle.short,
+                            min_length=1,
+                            max_length=24
                         )
 
                         self.add_item(self.item)
@@ -388,6 +706,19 @@ class MemberManagerBot(commands.Cog):
                             'course' : self.course
                         })
 
+                        try:
+                            embed = discord.Embed(
+                                title = '入会手続き',
+                                description = f'実行者:<@{interaction.user.id}>\n名前：{self.item.value}\n学年：{GRADE_DICT.get(self.grade,"--")}\nコース：{COURSE_DICT.get(self.course,"--")}\n入会手続きに成功しました',
+                                color = 0x8866cc,
+                                timestamp = datetime.datetime.now()
+                            )
+                            embed.set_author(name = '入会手続きウィジェット')
+                            await MemberManagerBot.output_log(interaction.guild,{'embed':embed})
+                        except:
+                            pass
+
+                        
                         if flag:
                             await interaction.followup.edit_message(interaction.message.id,**MemberManagerBot.JoinWidget.End(self.item.value,self.grade,self.course))
                         else:
@@ -748,6 +1079,19 @@ class MemberManagerBot(commands.Cog):
                     data['grade'] = self.grade
                     data['course'] = self.course
                     data['stop_count'] = 0
+
+                    try:
+                        embed = discord.Embed(
+                            title='更新手続きが完了しました',
+                            description=f'実行者:<@{interaction.user.id}>\n変更前：{self.member["grade"]}:{self.member["course"]}\n変更後：{self.grade}:{self.course}',
+                            color=0xffff00,
+                            timestamp=datetime.datetime.now(datetime.timezone.utc)
+                        )
+                        embed.set_author(name = '更新ウィジェット')
+                        await MemberManagerBot.output_log(interaction.guild,{'embed':embed})
+                    except:
+                        pass
+
                     await MemberManagerBot.set_member_data(interaction.user,data)
                     await asyncio.sleep(10)
                     await interaction.followup.delete_message(interaction.message.id)
@@ -798,7 +1142,7 @@ class MemberManagerBot(commands.Cog):
                         color = 0x8866cc
                     )
 
-                    self.add_field(name='班一覧',value='\n'.join([f'{v["emoji"]}：{v["label"]}' for k,v in MemberManagerBot.DATA[str(guild.id)].interests.items()]))
+                    self.add_field(name='班一覧',value='\n'.join([f'{v["emoji"].replace("︎","").replace("️","")}：{v["label"]}' for k,v in MemberManagerBot.DATA[str(guild.id)].interests.items()]))
                 pass
 
             class View(discord.ui.View):
@@ -823,7 +1167,7 @@ class MemberManagerBot(commands.Cog):
                     interests = MemberManagerBot.DATA[str(guild.id)].interests
                     super().__init__(
                         title = '現在の所属班',
-                        description = '\n'.join([f'{interests[i]["emoji"]}:{interests[i]["label"]}' for i in mem.get('interest',[]) if i in interests.keys()]),
+                        description = '\n'.join([f'{interests[i]["emoji"].replace("︎","").replace("️","")}:{interests[i]["label"]}' for i in mem.get('interest',[]) if i in interests.keys()]),
                         color = 0x8866cc
                     )
 
@@ -840,7 +1184,7 @@ class MemberManagerBot(commands.Cog):
                         btn = discord.ui.Button(
                             style = discord.ButtonStyle.green if (key in self.interest) else discord.ButtonStyle.grey,
                             custom_id = key,
-                            emoji = value['emoji']
+                            emoji = value['emoji'].replace('︎','').replace('️','')
                         )
                         btn.callback = self.on_interest
                         self.add_item(btn)
@@ -879,7 +1223,20 @@ class MemberManagerBot(commands.Cog):
                     await interaction.response.defer(thinking=False,ephemeral=True)
 
                     data = self.mem.copy()
+                    before = data.get('interest',[])
                     data['interest'] = self.interest
+
+                    try:
+                        embed = discord.Embed(
+                            title='所属班が変更されました',
+                            description=f'実行者:<@{interaction.user.id}>\n変更前：{",".join([self.interests[i]['label'] for i in before])}\n変更後：{",".join([self.interests[i]['label'] for i in self.interest])}',
+                            color = 0xffff00,
+                            timestamp=datetime.datetime.now(datetime.timezone.utc)
+                        )
+                        embed.set_author(name = '所属班設定ウィジェット')
+                        await MemberManagerBot.output_log(interaction.guild,{'embed':embed})
+                    except:
+                        pass
 
                     await MemberManagerBot.set_member_data(interaction.user,data)
                     await interaction.followup.edit_message(interaction.message.id,**MemberManagerBot.InterestWidget.End())
@@ -901,7 +1258,7 @@ class MemberManagerBot(commands.Cog):
                 pass
 
 
-    # クラス変数
+    # クラス変数 !B
     INSTANCE = None
 
     Bot : discord.Client
@@ -920,6 +1277,8 @@ class MemberManagerBot(commands.Cog):
     async def mgt_hour_loop(self):
         try:
             for guild in self.Bot.guilds:
+                data = self.DATA.get(str(guild.id),None)
+                data.state = False
                 try:
                     await self.update_year_counter(guild)
                 except:
@@ -929,6 +1288,12 @@ class MemberManagerBot(commands.Cog):
                     await self.update_member_counter(guild)
                 except:
                     pass
+
+                try:
+                    await self.apply_all_member(guild)
+                except:
+                    pass
+                data.state = True
         except:
             pass
 
@@ -964,8 +1329,6 @@ class MemberManagerBot(commands.Cog):
                     except:
                         pass
 
-                await cls.apply_all_member(guild)
-
                 await cls.debug_resend(guild)
 
                 state &= True
@@ -980,7 +1343,7 @@ class MemberManagerBot(commands.Cog):
 
 
 
-    # イベント
+    # イベント !B
     @commands.Cog.listener()
     async def on_ready(self):
         pass
@@ -995,119 +1358,199 @@ class MemberManagerBot(commands.Cog):
             if not guild_data.state:
                 await itc.followup.send('このボットは現在正常に動作していません',ephemeral=True)
                 return
-            
+
 
             if (itc.data.get('custom_id','').startswith('media_mgt')):
                 if (itc.data.get('custom_id','').startswith('media_mgt_join')):
                     if (itc.message.id == guild_data.channels.get('join',{}).get('message')):
-                        await itc.response.send_message(**self.JoinWidget.Main(),ephemeral=True)
+                        if (guild_data.members.get(str(itc.user.id)) is not None):
+                            await itc.response.send_message('既に登録済みです',ephemeral=True)
+                        else:
+                            await itc.response.send_message(**self.JoinWidget.Main(),ephemeral=True)
                 elif (itc.data.get('custom_id','').startswith('media_mgt_update')):
                     if (itc.message.id == guild_data.channels.get('update',{}).get('message')):
                         member = guild_data.members.get(str(itc.user.id))
-                        if member['stop_count'] == 0:
-                            await itc.response.defer(thinking=False,ephemeral=True)
-                        if member['stop_count'] > 0:
+                        if member is None:
+                            await itc.response.send_message('メンバー情報が見つかりません',ephemeral=True)
+                        elif member['stop_count'] <= 0:
+                            await itc.response.send_message('更新手続きの条件を満たしていません',ephemeral=True)
+                        elif member['stop_count'] > 0:
                             await itc.response.send_message(**self.UpdateWidget.Main(member),ephemeral=True)
                 elif (itc.data.get('custom_id','').startswith('media_mgt_interest')):
                     if (itc.message.id == guild_data.channels.get('interest',{}).get('message')):
-                        await itc.response.send_message(**self.InterestWidget.Main(itc.guild,guild_data.members.get(str(itc.user.id),{})),ephemeral=True)
-                elif (itc.data.get('custom_id','').startswith('media_mgt_debug')):
-                    await itc.response.defer(thinking=False,ephemeral=True)
-                    try:
-                        if (itc.data.get('custom_id','') == 'media_mgt_debug_command1'):
-                            if (guild_data.members.get(str(itc.user.id)) is  None):
-                                raise
-                            guild_data.members[str(itc.user.id)]['stop_count'] += 1
-                            await self.set_member_data(itc.user)
-                            await itc.followup.send('更新回数を設定しました',ephemeral=True)
-
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command2'):
-                            if (guild_data.members.get(str(itc.user.id)) is  None):
-                                raise
-                            guild_data.members[str(itc.user.id)]['stop_count'] += 2
-                            await self.set_member_data(itc.user)
-                            await itc.followup.send('更新回数を設定しました',ephemeral=True)
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command3'):
-                            if (guild_data.members.get(str(itc.user.id)) is  None):
-                                raise
-                            guild_data.members[str(itc.user.id)]['stop_count'] = 0
-                            await self.set_member_data(itc.user)
-                            await itc.followup.send('更新回数を設定しました',ephemeral=True)
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command4'):
-                            if (guild_data.members.get(str(itc.user.id)) is  None):
-                                raise
-                            await self.clear_member_data(itc.user)
-                            await itc.followup.send('メンバーのデータをクリアしました',ephemeral=True)
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command5'):
-                            await itc.followup.send(str(guild_data.members),ephemeral=True)
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command6'):
-                            rank = 'visitor'
-
-                            data = guild_data.members.get(str(itc.user.id),{})
-                            data['rank'] = rank
-
-                            await self.set_member_data(itc.user,data)
-
-                            await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                            await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command7'):
-                            rank = 'member'
-
-                            data = guild_data.members.get(str(itc.user.id),{})
-                            data['rank'] = rank
-
-                            await self.set_member_data(itc.user,data)
-
-                            await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                            await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command8'):
-                            rank = 'staff'
-
-                            data = guild_data.members.get(str(itc.user.id),{})
-                            data['rank'] = rank
-
-                            await self.set_member_data(itc.user,data)
-
-                            await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                            await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command9'):
-                            rank = 'admin'
-
-                            data = guild_data.members.get(str(itc.user.id),{})
-                            data['rank'] = rank
-
-                            await self.set_member_data(itc.user,data)
-
-                            await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                            await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
-                            pass
-                        elif (itc.data.get('custom_id','') == 'media_mgt_debug_command10'):
-                            rank = 'owner'
-
-                            data = guild_data.members.get(str(itc.user.id),{})
-                            data['rank'] = rank
-
-                            await self.set_member_data(itc.user,data)
-
-                            await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
-                            await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
-                            pass
-
+                        if (guild_data.members.get(str(itc.user.id)) is None):
+                            await itc.response.send_message('メンバー情報が見つかりません',ephemeral=True)
                         else:
-                            await itc.followup.send('不明なコマンド',ephemeral=True)
-                    except Exception as e:
-                        await itc.followup.send('エラーが発生しました',ephemeral=True)
-  
+                            await itc.response.send_message(**self.InterestWidget.Main(itc.guild,guild_data.members.get(str(itc.user.id),[])),ephemeral=True)
+                
+                elif (itc.data.get('custom_id','').startswith('media_mgt_debug')):
+                    if (itc.data.get('custom_id','') == 'media_mgt_debug_name'):
+                        if (guild_data.members.get(str(itc.user.id),{}).get('grade') == 'graduation'):
+                            await itc.response.send_message('このイベントは卒業したメンバーのみ利用できます',ephemeral=True)
+                        else:
+                            await itc.response.send_modal(TestWidget())
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_reset'):
+                        if (guild_data.members.get(str(itc.user.id)) is None):
+                            await itc.response.send_message('メンバー情報が見つかりません',ephemeral=True)
+                        else:
+                            await itc.response.defer(thinking=False,ephemeral=True)
+                            try:
+                                await self.clear_member_data(itc.user)
+                                await itc.followup.send('データをリセットしました',ephemeral=True)
+                            except:
+                                await itc.followup.send('リセットに失敗しました',ephemeral=True)
+                    
+                    elif (itc.data.get('custom_id','').startswith('media_mgt_debug_course')):
+                        if (guild_data.members.get(str(itc.user.id),{}).get('grade') == 'graduation'):
+                            await itc.response.send_message('このイベントは卒業したメンバーのみ利用できます',ephemeral=True)
+                        else:
+                            await itc.response.defer(thinking=False,ephemeral=True)
+                            try:
+                                if (itc.data.get('custom_id','') == 'media_mgt_debug_courseT'):
+                                    data = guild_data.members.get(str(itc.user.id),{})
+                                    data['course'] = 'courseT'
+                                    await self.set_member_data(itc.user,data)
+                                    await itc.followup.send('コースを設定しました',ephemeral=True)
+                                elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseR'):
+                                    data = guild_data.members.get(str(itc.user.id),{})
+                                    data['course'] = 'courseR'
+                                    await self.set_member_data(itc.user,data)
+                                    await itc.followup.send('コースを設定しました',ephemeral=True)
+                                elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseA'):
+                                    data = guild_data.members.get(str(itc.user.id),{})
+                                    data['course'] = 'courseA'
+                                    await self.set_member_data(itc.user,data)
+                                    await itc.followup.send('コースを設定しました',ephemeral=True)
+                                elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseW'):
+                                    data = guild_data.members.get(str(itc.user.id),{})
+                                    data['course'] = 'courseW'
+                                    await self.set_member_data(itc.user,data)
+                                    await itc.followup.send('コースを設定しました',ephemeral=True)
+                            except:
+                                await itc.followup.send('コース設定に失敗しました',ephemeral=True)
+
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_reset'):
+                        await self.clear_member_data(itc.user)
+                        await itc.followup.send('データをリセットしました',ephemeral=True)
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseT'):
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['course'] = 'courseT'
+                        await self.set_member_data(itc.user,data)
+                        await itc.followup.send('コースを設定しました',ephemeral=True)
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseR'):
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['course'] = 'courseR'
+                        await self.set_member_data(itc.user,data)
+                        await itc.followup.send('コースを設定しました',ephemeral=True)
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseA'):
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['course'] = 'courseA'
+                        await self.set_member_data(itc.user,data)
+                        await itc.followup.send('コースを設定しました',ephemeral=True)
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_courseW'):
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['course'] = 'courseW'
+                        await self.set_member_data(itc.user,data)
+                        await itc.followup.send('コースを設定しました',ephemeral=True)
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_name'):
+                        modal = discord.ui.Modal(title='名前変更',custom_id='media_mgt_debug_name_set')
+                        name_input = discord.ui.TextInput(label='名前',placeholder='名前',style=discord.TextInputStyle.short)
+                        modal.add_item(name_input)
+                        await itc.response.send_modal(modal)
+                        pass
+
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command1'):
+                        if (guild_data.members.get(str(itc.user.id)) is  None):
+                            raise
+                        guild_data.members[str(itc.user.id)]['stop_count'] += 1
+                        await self.set_member_data(itc.user)
+                        await itc.followup.send('更新回数を設定しました',ephemeral=True)
+
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command2'):
+                        if (guild_data.members.get(str(itc.user.id)) is  None):
+                            raise
+                        guild_data.members[str(itc.user.id)]['stop_count'] += 2
+                        await self.set_member_data(itc.user)
+                        await itc.followup.send('更新回数を設定しました',ephemeral=True)
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command3'):
+                        if (guild_data.members.get(str(itc.user.id)) is  None):
+                            raise
+                        guild_data.members[str(itc.user.id)]['stop_count'] = 0
+                        await self.set_member_data(itc.user)
+                        await itc.followup.send('更新回数を設定しました',ephemeral=True)
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command4'):
+                        if (guild_data.members.get(str(itc.user.id)) is  None):
+                            raise
+                        await self.clear_member_data(itc.user)
+                        await itc.followup.send('メンバーのデータをクリアしました',ephemeral=True)
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command5'):
+                        await itc.followup.send(str(guild_data.members),ephemeral=True)
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command6'):
+                        rank = 'visitor'
+
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['rank'] = rank
+
+                        await self.set_member_data(itc.user,data)
+
+                        await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
+                        await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command7'):
+                        rank = 'member'
+
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['rank'] = rank
+
+                        await self.set_member_data(itc.user,data)
+
+                        await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
+                        await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command8'):
+                        rank = 'staff'
+
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['rank'] = rank
+
+                        await self.set_member_data(itc.user,data)
+
+                        await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
+                        await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command9'):
+                        rank = 'admin'
+
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['rank'] = rank
+
+                        await self.set_member_data(itc.user,data)
+
+                        await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
+                        await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
+                        pass
+                    elif (itc.data.get('custom_id','') == 'media_mgt_debug_command10'):
+                        rank = 'owner'
+
+                        data = guild_data.members.get(str(itc.user.id),{})
+                        data['rank'] = rank
+
+                        await self.set_member_data(itc.user,data)
+
+                        await itc.followup.send('メンバーのランクを設定しました',ephemeral=True)
+                        await self.output_log(itc.guild,self.generate_command_log_embed(itc,'メンバーのランクを設定しました'))
+                        pass
+
+                    else:
+                        await itc.followup.send('不明なコマンド',ephemeral=True)
 
 
-    # コマンド
+
+    # コマンド !B
     def command_checker(func):
         @functools.wraps(func)
         async def wrapper(self,ctx:discord.Interaction,**kwargs):
@@ -1158,7 +1601,7 @@ class MemberManagerBot(commands.Cog):
 
 
 
-    # コマンド:チャンネル設定✅
+    # コマンド:チャンネル設定✅ !B
     @discord.app_commands.command(name='media_mgt_set_channel',description='チャンネルを設定します')
     @discord.app_commands.choices(
         channel_type = [
@@ -1186,7 +1629,7 @@ class MemberManagerBot(commands.Cog):
             raise InputError('channel_type')
         if channel is None:
             channel = ctx.channel
-        
+
         ctx.extras['process'] = '埋め込みメッセージ送信'
         message : discord.Message = None
         if (channel_type.value == 'join'):
@@ -1195,7 +1638,7 @@ class MemberManagerBot(commands.Cog):
             message = await channel.send(**self.UpdateWidget.Start())
         elif (channel_type.value == 'interest'):
             message = await channel.send(**self.InterestWidget.Start(ctx.guild))
-        
+
         ctx.extras['process'] = 'データ更新'
         guild_data.channels[channel_type.value] = {
             'channel':channel.id,
@@ -1209,7 +1652,7 @@ class MemberManagerBot(commands.Cog):
         log = self.generate_command_log_embed(ctx,msg)
 
         return res,log
-            
+
 
     @discord.app_commands.command(name='media_mgt_set_category',description='カテゴリを設定します')
     @discord.app_commands.choices(
@@ -1234,12 +1677,12 @@ class MemberManagerBot(commands.Cog):
             raise InputError('category_type')
         elif (category_type.value not in ['creation','hidden']):
             raise InputError('category_type')
-        
+
         if category is None:
             category = ctx.channel.category
         elif (type(category) is not discord.CategoryChannel):
             raise InputError('category')
-        
+
         ctx.extras['process'] = 'データ更新'
         guild_data.channels[category_type.value] = {
             'channel': category.id,
@@ -1255,7 +1698,7 @@ class MemberManagerBot(commands.Cog):
         return res,log
 
 
-    # コマンド:データ編集
+    # コマンド:データ編集 !B
     @discord.app_commands.command(name='media_mgt_view_mydata',description='自身の情報を表示します')
     @command_checker
     async def media_mgt_view_mydata(self,ctx:discord.Interaction):
@@ -1285,7 +1728,7 @@ class MemberManagerBot(commands.Cog):
 
         ctx.extras['process'] = '出力'
         return {'embed':embed},self.generate_command_log_embed(ctx,'ユーザーの情報を表示しました')
-    
+
 
 
     @discord.app_commands.command(name='media_mgt_view_member',description='メンバーの情報を表示します')
@@ -1318,7 +1761,7 @@ class MemberManagerBot(commands.Cog):
 
         ctx.extras['process'] = '出力'
         return {'embed':embed},self.generate_command_log_embed(ctx,'ユーザーの情報を表示しました')
-        
+
 
     @discord.app_commands.command(name='media_mgt_set_rank',description='メンバーのランクを設定します')
     @discord.app_commands.choices(
@@ -1346,12 +1789,12 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = '入力確認'
         if (type(member) is not discord.Member):
             raise InputError('member')
-        
+
         if (type(rank) is not discord.app_commands.models.Choice):
             raise InputError('rank')
         elif (rank.value not in ['visitor','member','staff','admin','retirement','consultant']):
             raise InputError('rank')
-        
+
 
         ctx.extras['process'] = 'ユーザー確認'
         if (guild_data.members.get(str(member.id)) is None):
@@ -1373,7 +1816,7 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = '出力'
         res = {'content':'メンバーのランクを設定しました'}
         log = self.generate_command_log_embed(ctx,'メンバーのランクを設定しました')
-        log.add_field(name='メンバー情報',value=self.member_data_to_code(guild_data.interests,data))
+        log['embed'].add_field(name='メンバー情報',value=self.member_data_to_code(guild_data.interests,data))
 
         return res,log
 
@@ -1392,10 +1835,10 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = '入力確認'
         if (type(member) is not discord.Member):
             raise InputError('member')
-        
+
         if (type(mode) is not bool):
             raise InputError('mode')
-        
+
         if (type(interest) is not str):
             raise InputError('interest')
         elif (interest not in guild_data.interests.keys()):
@@ -1484,35 +1927,35 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = '入力確認'
         if (type(member) is not discord.Member):
             raise InputError('member')
-        
+
         if (type(name) is not str) and (name is not None):
             raise InputError('name')
-        
+
         if (type(rank) is not discord.app_commands.models.Choice) and (rank is not None):
             raise InputError('rank')
         elif (rank.value not in ['visitor','member','staff','admin','retirement','consultant']):
             raise InputError('rank')
-        
+
         if (type(grade) is not discord.app_commands.models.Choice) and (grade is not None):
             raise InputError('grade')
         elif (grade.value not in ['graduation','special','grade1','grade2','grade3','grade4','grade5']):
             raise InputError('grade')
-        
+
         if (type(course) is not discord.app_commands.models.Choice) and (course is not None):
             raise InputError('course')
         elif (course.value not in ['class5','class6','class7','class8','courseT','courseA','courseR','courseW']):
             raise InputError('course')
-        
+
         ctx.extras['process'] = 'ユーザー確認'
         member_data = guild_data.members.get(str(member.id))
         if member_data is None:
             raise NoMemberError(member.name)
-        
+
 
         ctx.extras['process'] = 'ランク照合'
         self.check_member_rank_editable(ctx.user,member,rank.value if (rank is not None) else None)
 
-        
+
         ctx.extras['process'] = 'メンバー情報更新'
         data = {
             'name':name if (name is not None) else member_data.get('name'),
@@ -1520,7 +1963,8 @@ class MemberManagerBot(commands.Cog):
             'grade':grade.value if (grade is not None) else member_data.get('grade'),
             'course':course.value if (course is not None) else member_data.get('course'),
             'interest':guild_data.members.get(str(member.id),{}).get('interest',[]).copy(),
-            'stop_count':0
+            'stop_count':0,
+            'lock':0
         }
         flag = await self.set_member_data(member,data)
 
@@ -1534,7 +1978,7 @@ class MemberManagerBot(commands.Cog):
 
 
 
-    
+
     @discord.app_commands.command(name='media_mgt_clear_member',description='メンバーのデータをクリアします')
     @discord.app_commands.describe(member='対象メンバー')
     @command_checker
@@ -1545,13 +1989,13 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = '入力確認'
         if (type(member) is not discord.Member):
             raise InputError('member')
-        
+
 
         ctx.extras['process'] = 'ユーザー確認'
         member_data = guild_data.members.get(str(member.id))
         if member_data is None:
             raise NoMemberError(member.name)
-        
+
 
         ctx.extras['process'] = 'メンバー情報更新'
         flag = await self.clear_member_data(member)
@@ -1565,10 +2009,79 @@ class MemberManagerBot(commands.Cog):
 
 
 
+    @discord.app_commands.command(name='media_mgt_member_suspension',description='メンバーを一時停止します')
+    @discord.app_commands.describe(member='対象メンバー')
+    @discord.app_commands.describe(duration='停止時間(日)')
+    @discord.app_commands.describe(reason='停止理由')
+    @command_checker
+    async def media_mgt_member_suspension(self,ctx:discord.Interaction,member:discord.Member,duration:int,reason:str = None):
+        guild_data : GuildData = ctx.extras['data']
 
 
-    # コマンド:班設定
-    
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+
+        if (type(duration) is not int):
+            raise InputError('duration')
+
+        if reason is None:
+            reason = '不明'
+        elif (type(reason) is not str):
+            raise InputError('reason')
+
+
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(member.id))
+        if member_data is None:
+            raise NoMemberError(member.name)
+
+        ctx.extras['process'] = 'ランク照合'
+        self.check_member_rank_editable(ctx.user,member,'member')
+
+        ctx.extras['process'] = 'メンバー情報更新'
+        member_data['lock'] = int(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d'))+duration
+        await self.set_member_data(member,member_data)
+
+        ctx.extras['process'] = '出力'
+        return {'content':'メンバーを一時停止しました'},self.generate_command_log_embed(ctx,'メンバーを一時停止しました')
+
+
+    @discord.app_commands.command(name='media_mgt_release_member',description='メンバーの一時停止を解除します')
+    @discord.app_commands.describe(member='対象メンバー')
+    @command_checker
+    async def media_mgt_release_member(self,ctx:discord.Interaction,member:discord.Member):
+        guild_data : GuildData = ctx.extras['data']
+
+
+        ctx.extras['process'] = '入力確認'
+        if (type(member) is not discord.Member):
+            raise InputError('member')
+
+
+        ctx.extras['process'] = 'ユーザー確認'
+        member_data = guild_data.members.get(str(member.id))
+        if member_data is None:
+            raise NoMemberError(member.name)
+
+
+        ctx.extras['process'] = 'ランク照合'
+        self.check_member_rank_editable(ctx.user,member,'member')
+
+
+        ctx.extras['process'] = 'メンバー情報更新'
+        member_data['lock'] = 0
+        self.set_member_data(member,member_data)
+
+
+        ctx.extras['process'] = '出力'
+        return {'content':'メンバーの一時停止を解除しました'},self.generate_command_log_embed(ctx,'メンバーの一時停止を解除しました')
+
+
+
+
+    # コマンド:班設定 !B
+
     @discord.app_commands.command(name='media_mgt_add_interest',description='班を追加します')
     @discord.app_commands.describe(label='名前')
     @discord.app_commands.describe(value='内部識別子')
@@ -1587,13 +2100,13 @@ class MemberManagerBot(commands.Cog):
     ):
         guild_data : GuildData = ctx.extras['data']
 
-        
+
         ctx.extras['process'] = 'カテゴリ情報取得'
-        category = self.get_category_data('creation')
+        category = self.get_category_data(ctx.guild,'creation')
         if category is None:
             raise NoChannelError('所属班カテゴリ')
 
-        
+
         ctx.extras['process'] = '入力確認'
         if (type(label) is not str):
             raise InputError('label')
@@ -1604,7 +2117,7 @@ class MemberManagerBot(commands.Cog):
             raise InputError('value')
         elif (value in guild_data.interests.keys()):
             raise InputError('value')
-        
+
         if (type(emoji) is not str):
             raise InputError('emoji')
         elif (emoji.replace('︎','').replace('️','') in [interest['emoji'].replace('︎','').replace('️','') for interest in guild_data.interests.values()] and (not is_emoji(emoji))):
@@ -1613,30 +2126,37 @@ class MemberManagerBot(commands.Cog):
 
         if (type(role) is not discord.Role) and (role is not None):
             raise InputError('role')
-        
+
         if (type(channel) is not discord.TextChannel) and (channel is not None):
             raise InputError('channel')
-        
+
 
         ctx.extras['process'] = 'ロール操作'
-        index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
+        index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()]+[1])
         if (role is None):
             role = await ctx.guild.create_role(name=label)
             await role.edit(position=index,color=guild_data.parameters.get('interest_color',0))
         else:
-            await role.edit(name=label,position=index,color=guild_data.parameters.get('interest_color',0))
+            await role.edit(name=label,position=index,color=guild_data.parameters.get('interest_color',0),permissions=discord.Permissions.none())
 
 
-        ctx.extras['process'] = 'チャンネル操作' 
-        index = max([i.position for i in category.text_channels])
+        ctx.extras['process'] = 'チャンネル操作'
+        index = max([i.position for i in category.text_channels]+[1])
         if (channel is None):
-            channel = await ctx.guild.create_text_channel(emoji+label,category=category,position=index)
+            channel = await ctx.guild.create_text_channel(emoji+label,category=category,position=index,slowmode_delay=1)
         else:
-            await channel.edit(name=emoji+label,category=category,position=index)
+            await channel.edit(name=emoji+label,category=category,position=index,slowmode_delay=1)
+        
+        await self.sync_permission(channel)
+        
+        overwrite = discord.PermissionOverwrite()
+        overwrite.create_public_threads = True
+        overwrite.create_private_threads = True
+        
+        await channel.set_permissions(role,overwrite=overwrite)
 
-
-
-        ctx.extras['process'] = '班情報更新' 
+            
+        ctx.extras['process'] = '班情報更新'
         data : interestData = {
             'label':label,
             'emoji':emoji,
@@ -1649,16 +2169,16 @@ class MemberManagerBot(commands.Cog):
 
         ctx.extras['process'] = '更新処理'
         await self.resend_widget(ctx.guild,'interest')
-        await self.apply_all_member()
+        await self.apply_all_member(ctx.guild)
 
 
         ctx.extras['process'] = '出力'
         res = {'content':'班を追加しました'}
         log = self.generate_command_log_embed(ctx,'班を追加しました')
-        log['embed'].add_field(name='班情報',value=self.interest_data_to_code(data),inline=True)
-        
+        log['embed'].add_field(name='班情報',value=self.interest_data_to_code(value,data),inline=True)
+
         return res,log
-    
+
 
 
 
@@ -1683,13 +2203,13 @@ class MemberManagerBot(commands.Cog):
     ):
         guild_data : GuildData = ctx.extras['data']
 
-        
+
         ctx.extras['process'] = 'カテゴリ情報取得'
-        creation_category = self.get_category_data('creation')
+        creation_category = self.get_category_data(ctx.guild,'creation')
         if creation_category is None:
             raise NoChannelError('所属班カテゴリ')
-        
-        hidden_category = self.get_category_data('hidden')
+
+        hidden_category = self.get_category_data(ctx.guild,'hidden')
         if hidden_category is None:
             raise NoChannelError('非表示カテゴリ')
 
@@ -1705,14 +2225,14 @@ class MemberManagerBot(commands.Cog):
             raise InputError('label')
         elif (label in [interest['label'] for interest in guild_data.interests.values()]):
             raise InputError('label')
-        
+
         if value is None:
             value = interest
         elif (type(value) is not str):
             raise InputError('value')
         elif (value in guild_data.interests.keys()):
             raise InputError('value')
-        
+
         if emoji is None:
             emoji = current['emoji']
         elif (type(emoji) is not str):
@@ -1723,10 +2243,10 @@ class MemberManagerBot(commands.Cog):
 
         if (type(role) is not discord.Role) and (role is not None):
             raise InputError('role')
-        
+
         if (type(channel) is not discord.TextChannel) and (channel is not None):
             raise InputError('channel')
-        
+
 
         ctx.extras['process'] = 'ロール操作'
         index = min([ctx.guild.get_role(i['role_id']).position for i in guild_data.interests.values()])
@@ -1735,17 +2255,25 @@ class MemberManagerBot(commands.Cog):
         else:
             before_role = ctx.guild.get_role(current['role_id'])
             await before_role.delete()
-        await role.edit(name=label,color=guild_data.parameters.get('interest_color',0),position=index)
+        await role.edit(name=label,color=guild_data.parameters.get('interest_color',0),position=index,permissions=discord.Permissions.none())
 
 
         ctx.extras['process'] = 'チャンネル操作'
         if (channel is None):
             channel = ctx.guild.get_channel(current['channel_id'])
-            await channel.edit(name=emoji+label,category=creation)
         else:
             before_channel = ctx.guild.get_channel(current['channel_id'])
             await before_channel.edit(category=hidden_category)
-        await channel.edit(name=emoji+label,category=creation_category,position=index)
+            await self.sync_permission(before_channel)
+
+        await channel.edit(name=emoji+label,category=creation_category,position=index,slowmode_delay=1)
+        await self.sync_permission(channel)
+
+        overwrite = discord.PermissionOverwrite()
+        overwrite.create_public_threads = True
+        overwrite.create_private_threads = True
+
+        await channel.set_permissions(role,overwrite=overwrite)
 
 
         ctx.extras['process'] = '班情報更新'
@@ -1770,9 +2298,9 @@ class MemberManagerBot(commands.Cog):
                     guild_data.members[key]['interest'] = interests
             except:
                 pass
-        await self.apply_all_member()
+        await self.apply_all_member(ctx.guild)
 
-        await self.resend_widget('interest')
+        await self.resend_widget(ctx.guild,'interest')
 
 
         ctx.extras['process'] = '出力'
@@ -1782,7 +2310,6 @@ class MemberManagerBot(commands.Cog):
         log['embed'].add_field(name='変更後',value=self.interest_data_to_code(value,data),inline=True)
 
         return res,log
-        
 
 
 
@@ -1794,9 +2321,9 @@ class MemberManagerBot(commands.Cog):
         guild_data : GuildData = ctx.extras['data']
 
 
-        
+
         ctx.extras['process'] = 'カテゴリ情報取得'
-        hidden_category = self.get_category_data('hidden')
+        hidden_category = self.get_category_data(ctx.guild,'hidden')
         if hidden_category is None:
             raise NoChannelError('非表示カテゴリ')
 
@@ -1805,7 +2332,7 @@ class MemberManagerBot(commands.Cog):
         current = guild_data.interests.get(interest)
         if (current is None):
             raise InputError('interest')
-        
+
 
         ctx.extras['process'] = 'ロール操作'
         role = ctx.guild.get_role(current['role_id'])
@@ -1814,6 +2341,7 @@ class MemberManagerBot(commands.Cog):
         ctx.extras['process'] = 'チャンネル操作'
         channel = ctx.guild.get_channel(current['channel_id'])
         await channel.edit(category=hidden_category)
+        await self.sync_permission(channel)
 
 
         ctx.extras['process'] = '班情報更新'
@@ -1822,8 +2350,8 @@ class MemberManagerBot(commands.Cog):
 
 
         ctx.extras['process'] = '更新処理'
-        await self.resend_widget('interest')
-        await self.apply_all_member()
+        await self.resend_widget(ctx.guild,'interest')
+        await self.apply_all_member(ctx.guild)
 
 
         ctx.extras['process'] = '出力'
@@ -1832,10 +2360,6 @@ class MemberManagerBot(commands.Cog):
         log['embed'].add_field(name='班情報',value=self.interest_data_to_code(interest,current),inline=True)
 
         return res,log
-
-
-
-
 
 
 
@@ -1863,18 +2387,26 @@ class MemberManagerBot(commands.Cog):
     @discord.app_commands.command(name='test_command2',description='テストコマンド2.使用禁止')
     @command_checker
     async def test_command2(self,ctx:discord.Interaction):
-        await ctx.response.defer(thinking=False,ephemeral=True)
-        try:
-            self.Bot.git.push()
-        except:
-            pass
-        await ctx.followup.send('テストコマンド2を実行しました',ephemeral=True)
+        embed = discord.Embed(title='仮設パネル',description='簡易的に設定を変更できます')
+
+        embed.add_field(name='現役の会員さんへ',value='青い「リセット」と書かれたボタンを押してください。\nその後は入会手続きチャンネルが表示されるはずなので指示に従って入力して下さい\n近日中に会員ロールを付与します',inline=False)
+        embed.add_field(name='卒業生の方々へ',value='緑のボタンでコースを変更できます。\n赤いボタンを押すと名前を変更できます',inline=False)
+
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label='リセット',style=discord.ButtonStyle.blurple,custom_id='media_mgt_debug_reset',row=0))
+        view.add_item(discord.ui.Button(label='情報通信',style=discord.ButtonStyle.green,custom_id='media_mgt_debug_courseT',row=1))
+        view.add_item(discord.ui.Button(label='ロボット',style=discord.ButtonStyle.green,custom_id='media_mgt_debug_courseR',row=1))
+        view.add_item(discord.ui.Button(label='航空宇宙',style=discord.ButtonStyle.green,custom_id='media_mgt_debug_courseA',row=1))
+        view.add_item(discord.ui.Button(label='医療福祉',style=discord.ButtonStyle.green,custom_id='media_mgt_debug_courseW',row=1))
+        view.add_item(discord.ui.Button(label='名前変更',style=discord.ButtonStyle.red,custom_id='media_mgt_debug_name',row=1))
+
+        message = await ctx.channel.send(embed=embed,view=view)
 
 
 
     # 関数
 
-    # 関数:ロード/セーブ
+    # 関数:ロード/セーブ !B
     @classmethod
     async def load_channels(cls,guild:discord.Guild):
         result = {
@@ -1908,8 +2440,24 @@ class MemberManagerBot(commands.Cog):
         return result
 
     # 関数:ロールデータ
+    @classmethod
+    async def sync_permission(cls,channel:discord.TextChannel):
+        try:
+            category = channel.category
+            for obj in channel.overwrites.keys():
+                if obj not in category.overwrites.keys():
+                    await channel.set_permissions(obj,overwrite=None)
+                    await asyncio.sleep(0.2)
+            
+            for key,value in category.overwrites.items():
+                await channel.set_permissions(key,overwrite=value)
+                await asyncio.sleep(0.2)
+            
+        except Exception as e:
+            print(e)
+            return None
 
-    # 関数:チャンネルデータ✅
+    # 関数:チャンネルデータ✅ !B
     @classmethod
     async def get_message_data(cls,guild:discord.Guild,widget:typing.Literal['join','update','interest']):
         try:
@@ -1939,6 +2487,7 @@ class MemberManagerBot(commands.Cog):
             return None
 
 
+
     @classmethod
     async def resend_widget(cls,guild:discord.Guild,widget:typing.Literal['join','update','interest']) -> bool:
         try:
@@ -1958,7 +2507,7 @@ class MemberManagerBot(commands.Cog):
             return False
 
 
-    # 関数:メンバーデータ編集
+    # 関数:メンバーデータ編集 !B
     @classmethod
     def check_member_rank_editable(cls,from_member:discord.Member,to_member:discord.Member,val:RANK = None):
         class RankValueError(FaildError):
@@ -2033,7 +2582,8 @@ class MemberManagerBot(commands.Cog):
             'grade' : data.get('grade') if(data.get('grade') in grade_values) else '',
             'course': data.get('course') if(data.get('course') in course_values) else '',
             'interest':sorted(list(set([str(i) for i in data.get('interest',[]) if i in cls.DATA.get(str(guild.id)).interests.keys()]))),
-            'stop_count': data.get('stop_count',0) if (type(data.get('stop_count',0)) is int) else 0
+            'stop_count': data.get('stop_count',0) if (type(data.get('stop_count',0)) is int) else 0,
+            'lock': data.get('lock',0) if (type(data.get('lock',0)) is int) else 0
         }
 
         # データ値の確認
@@ -2078,6 +2628,9 @@ class MemberManagerBot(commands.Cog):
         add_roles_id = []
         if (data is None):
             pass
+        elif (data['lock'] > int(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d'))):
+            add_roles_id.append(guild_data.role_tags.get('special_rank',{}).get('lock',{}).get('role_id',0))
+            pass
         elif (data['stop_count'] > 0):
             add_roles_id.append(guild_data.role_tags.get('special_rank',{}).get('stop',{}).get('role_id',0))
         else:
@@ -2093,10 +2646,10 @@ class MemberManagerBot(commands.Cog):
         add_roles    = [role for role in add_roles    if (role not in member.roles) and (role is not None)]
 
         if (len(remove_roles) > 0):
-            print('remove',remove_roles)
+            print('remove',member.id,remove_roles)
             await member.remove_roles(*remove_roles)
         if (len(add_roles) > 0):
-            print('add',add_roles)
+            print('add',member.id,add_roles)
             await member.add_roles(*add_roles)
 
         return True
@@ -2108,7 +2661,10 @@ class MemberManagerBot(commands.Cog):
         if (data is None):
             name = None
         else:
-            if (data['stop_count'] > 0):
+            if (data['lock'] > (d:=int(datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d')))):
+                val = '999+' if data['lock'] - d > 999 else str(data['lock'] - d)
+                name = data['name'] + f'_残り{val}日'
+            elif (data['stop_count'] > 0):
                 name = data['name']
             elif (data['rank'] == 'consultant'):
                 name = f'顧問_{data["name"]}'
@@ -2132,7 +2688,7 @@ class MemberManagerBot(commands.Cog):
                     elif (data['grade'] == 'grade5'):name += '5'
                 name += '_'
 
-                name += data['name']
+                name += data['name'][:24]
 
                 for interest in data['interest']:
                     name += str(cls.DATA[str(member.guild.id)].interests.get(interest,{}).get('emoji',''))
@@ -2235,7 +2791,7 @@ class MemberManagerBot(commands.Cog):
         await cls.apply_all_member(guild)
 
 
-    # 関数:統計更新
+    # 関数:統計更新 !B
     @classmethod
     async def update_year_counter(cls,guild:discord.Guild):
         data = cls.DATA[str(guild.id)]
@@ -2291,7 +2847,7 @@ class MemberManagerBot(commands.Cog):
             pass
 
 
-    # 関数:変換
+    # 関数:変換 !B
     @classmethod
     def member_data_to_code(cls,interests,data:memberData):
         rank_label = {
@@ -2345,7 +2901,7 @@ class MemberManagerBot(commands.Cog):
 
 
 
-    # 関数:ログ
+    # 関数:ログ !B
     @classmethod
     async def output_log(cls,guild:discord.Guild,data):
         guild_data = cls.DATA[str(guild.id)]
@@ -2471,7 +3027,7 @@ class MemberManagerBot(commands.Cog):
         return embed
 
 
-    # デバッグ
+    # デバッグ !B
     @classmethod
     async def debug_resend(cls,guild:discord.Guild):
         try:
