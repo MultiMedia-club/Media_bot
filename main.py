@@ -121,5 +121,5 @@ class MediaBot(commands.Bot):
             await interaction.followup.send('失敗しました',ephemeral=True)
 
         
-server_thread()
+server_thread(os.environ['SERVICE_PORT'])
 bot = MediaBot()

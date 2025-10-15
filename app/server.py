@@ -9,9 +9,9 @@ app = FastAPI()
 async def root():
 	return {"message": "Server is Online."}
 
-def start():
-	uvicorn.run(app, host="0.0.0.0", port=8000)
+def start(port=8000):
+	uvicorn.run(app, host="0.0.0.0", port=port)
 
-def server_thread():
-	t = Thread(target=start)
+def server_thread(port=8000):
+	t = Thread(target=start, args=(port,))
 	t.start()

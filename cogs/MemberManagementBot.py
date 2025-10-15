@@ -2915,7 +2915,7 @@ class MemberManagerBot(commands.Cog):
     async def generete_load_log_embed(guild:discord.Guild,load_data:dict):
         file_log = ''
         for k,v in load_data.items():
-            file_log += f'[2;33m{k: <12}[2;37m:[0m[2;33m[0m{'[2;32m[1;32m成功[0m[2;32m[0m' if v else '[2;31m[1;31m失敗[0m[2;31m[0m'}\n'
+            file_log += f'[2;33m{k: <12}[2;37m:[0m[2;33m[0m{"[2;32m[1;32m成功[0m[2;32m[0m" if v else "[2;31m[1;31m失敗[0m[2;31m[0m"}\n'
             pass
 
         channel_log = ''
@@ -2924,7 +2924,7 @@ class MemberManagerBot(commands.Cog):
         result = await MemberManagerBot.load_channels(guild)
         for key,value in result.items():
             flag = value
-            channel_log += f'[2;33m{key: <8}[2;37m:[0m[2;33m[0m{'[2;32m[1;32m接続成功[0m[2;32m[0m' if flag else '[2;31m[1;31m失敗[0m[2;31m[0m'}\n'
+            channel_log += f'[2;33m{key: <8}[2;37m:[0m[2;33m[0m{"[2;32m[1;32m接続成功[0m[2;32m[0m" if flag else "[2;31m[1;31m失敗[0m[2;31m[0m"}\n'
 
 
         embed = discord.Embed(title='ロード完了',description='ボットが起動しました',color=discord.Color.green())
